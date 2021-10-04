@@ -43,6 +43,13 @@ feature_perturbation_codes = {
     "global_path_dependent": 2
 }
 
+algorithm_codes = {
+    "v0": 0,
+    "v1": 1,
+    "v2": 2,
+    "auto": 3
+}
+
 class Tree(Explainer):
     """ Uses Tree SHAP algorithms to explain the output of ensemble tree models.
 
@@ -51,7 +58,7 @@ class Tree(Explainer):
     implementations either inside an externel model package or in the local compiled C extention.
     """
 
-    def __init__(self, model, data = None, model_output="raw", feature_perturbation="interventional", feature_names=None, approximate=False, **deprecated_options):
+    def __init__(self, model, data = None, model_output="raw", feature_perturbation="interventional", algorithm="v0", feature_names=None, approximate=False, shortcut=True, **deprecated_options):
         """ Build a new Tree explainer for the passed model.
 
         Parameters
@@ -75,6 +82,16 @@ class Tree(Explainer):
             of training examples that went down each leaf to represent the background distribution. This approach
             does not require a background dataset and so is used by default when no background dataset is provided.
 
+        algorithm : "auto" (default), "v0", "v1" or "v2"
+            The "v0" algorithm refers to TreeSHAP algorithm in SHAP package (https://github.com/slundberg/shap).
+            The "v1" and "v2" algorithms refer to Fast TreeSHAP v1 algorithm and Fast TreeSHAP v2 algorithm
+            proposed in paper https://arxiv.org/abs/2109.09847 (Jilei 2021). In practice, Fast TreeSHAP v1 is 1.5x 
+            faster than TreeSHAP while keeping the memory cost unchanged, and Fast TreeSHAP v2 is 2.5x faster than 
+            TreeSHAP at the cost of a slightly higher memory usage. The default value of algorithm is "auto", 
+            which automatically chooses the most appropriate algorithm to use. Specifically, we always prefer 
+            "v1" over "v0", and we prefer "v2" over "v1" when the number of samples to be explained is sufficiently 
+            large, and the memory constraint is also satisfied.
+
         model_output : "raw", "probability", "log_loss", or model method name
             What output of the model should be explained. If "raw" then we explain the raw output of the
             trees, which varies by model. For regression models "raw" is the standard output, for binary
@@ -86,6 +103,11 @@ class Tree(Explainer):
             then we explain the log base e of the model loss function, so that the SHAP values sum up to the
             log loss of the model for each sample. This is helpful for breaking down model performance by feature.
             Currently the probability and logloss options are only supported when feature_dependence="independent".
+
+        shortcut: True (default) or False
+            whether to use the C++ version of TreeSHAP embedded in XGBoost, LightGBM, and CatBoost packages directly
+            when computing SHAP values for XGBoost, LightGBM, and CatBoost models and when computing SHAP interaction
+            values for XGBoost models.
 
         Examples
         --------
@@ -144,15 +166,19 @@ class Tree(Explainer):
                     "using shap.sample(data, 100) to create a smaller background data set.")
         self.data_missing = None if self.data is None else pd.isna(self.data)
         self.feature_perturbation = feature_perturbation
+        self.algorithm = algorithm
         self.expected_value = None
         self.model = TreeEnsemble(model, self.data, self.data_missing, model_output)
         self.model_output = model_output
         #self.model_output = self.model.model_output # this allows the TreeEnsemble to translate model outputs types by how it loads the model
         
         self.approximate = approximate
+        self.shortcut = shortcut
 
         if feature_perturbation not in feature_perturbation_codes:
             raise ValueError("Invalid feature_perturbation option!")
+        if algorithm not in algorithm_codes:
+            raise ValueError("Invalid algorithm option!")
 
         # check for unsupported combinations of feature_perturbation and model_outputs
         if feature_perturbation == "tree_path_dependent":
@@ -214,11 +240,11 @@ class Tree(Explainer):
 
         if not interactions:
             v = self.shap_values(X, y=y, from_call=True, check_additivity=check_additivity, approximate=self.approximate)
-            if type(v) is list:
-                v = np.stack(v, axis=-1) # put outputs at the end
         else:
             assert not self.approximate, "Approximate computation not yet supported for interaction effects!"
             v = self.shap_interaction_values(X)
+        if type(v) is list:
+            v = np.stack(v, axis=-1) # put outputs at the end
 
         # the explanation object expects an expected value for each row
         if hasattr(self.expected_value, "__len__"):
@@ -317,8 +343,45 @@ class Tree(Explainer):
         if tree_limit is None:
             tree_limit = -1 if self.model.tree_limit is None else self.model.tree_limit
 
+        # choose the most appropriate TreeSHAP algorithm
+        if self.algorithm == "auto":
+            # check if number of samples to be explained is sufficiently large
+            num_samples = X.shape[0]
+            num_samples_threshold = 2**(self.model.max_depth + 1) / self.model.max_depth
+            num_samples_check = (num_samples >= num_samples_threshold)
+            # check if memory constraint is satisfied
+            try:
+                max_leaves = (max(self.model.num_nodes) + 1) / 2
+                max_combinations = 2**self.model.max_depth
+                memory_usage = max_leaves * max_combinations * 8
+                import psutil
+                memory_tolerance = 0.75 * psutil.virtual_memory().total
+                memory_check = (memory_usage <= memory_tolerance)
+            except:
+                memory_check = (self.model.max_depth <= 16)
+            if num_samples_check and memory_check:
+                algorithm = "v2"
+            else:
+                algorithm = "v1"
+        else:
+            algorithm = self.algorithm
+            if algorithm == "v2":
+                try:
+                    max_leaves = (max(self.model.num_nodes) + 1) / 2
+                    max_combinations = 2**self.model.max_depth
+                    memory_usage = max_leaves * max_combinations * 8
+                    import psutil
+                    memory_tolerance = 0.75 * psutil.virtual_memory().total
+                    memory_check = (memory_usage <= memory_tolerance)
+                except:
+                    memory_check = (self.model.max_depth <= 16)
+                if not memory_check:
+                    warnings.warn("There may exist memory issue for algorithm v2. Switched to algorithm v1.")
+                    algorithm = "v1"
+
+
         # shortcut using the C++ version of Tree SHAP in XGBoost, LightGBM, and CatBoost
-        if self.feature_perturbation == "tree_path_dependent" and self.model.model_type != "internal" and self.data is None:
+        if self.feature_perturbation == "tree_path_dependent" and self.model.model_type != "internal" and self.data is None and self.shortcut:
             model_output_vals = None
             phi = None
             if self.model.model_type == "xgboost":
@@ -393,7 +456,7 @@ class Tree(Explainer):
                 self.model.features, self.model.thresholds, self.model.values, self.model.node_sample_weight,
                 self.model.max_depth, X, X_missing, y, self.data, self.data_missing, tree_limit,
                 self.model.base_offset, phi, feature_perturbation_codes[self.feature_perturbation],
-                output_transform_codes[transform], False
+                output_transform_codes[transform], algorithm_codes[algorithm], False
             )
         else:
             _cext.dense_tree_saabas(
@@ -469,8 +532,17 @@ class Tree(Explainer):
         if tree_limit is None:
             tree_limit = -1 if self.model.tree_limit is None else self.model.tree_limit
 
+        # choose the most appropriate TreeSHAP algorithm
+        if self.algorithm == "auto":
+            algorithm = "v1"
+        elif self.algorithm == "v2":
+            warnings.warn("Algorithm v2 does not support interactions. Switched to algorithm v1.")
+            algorithm = "v1"
+        else:
+            algorithm = self.algorithm
+
         # shortcut using the C++ version of Tree SHAP in XGBoost
-        if self.model.model_type == "xgboost" and self.feature_perturbation == "tree_path_dependent":
+        if self.model.model_type == "xgboost" and self.feature_perturbation == "tree_path_dependent" and self.shortcut:
             import xgboost
             if not isinstance(X, xgboost.core.DMatrix):
                 X = xgboost.DMatrix(X)
@@ -495,7 +567,7 @@ class Tree(Explainer):
             self.model.features, self.model.thresholds, self.model.values, self.model.node_sample_weight,
             self.model.max_depth, X, X_missing, y, self.data, self.data_missing, tree_limit,
             self.model.base_offset, phi, feature_perturbation_codes[self.feature_perturbation],
-            output_transform_codes[transform], True
+            output_transform_codes[transform], algorithm_codes[algorithm], True
         )
 
         return self._get_shap_interactions_output(phi,flat_output)

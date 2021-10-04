@@ -129,15 +129,16 @@ static PyObject *_cext_dense_tree_shap(PyObject *self, PyObject *args)
     PyObject *out_contribs_obj;
     int feature_dependence;
     int model_output;
+    int algorithm;
     PyObject *base_offset_obj;
     bool interactions;
   
     /* Parse the input tuple */
     if (!PyArg_ParseTuple(
-        args, "OOOOOOOiOOOOOiOOiib", &children_left_obj, &children_right_obj, &children_default_obj,
+        args, "OOOOOOOiOOOOOiOOiiib", &children_left_obj, &children_right_obj, &children_default_obj,
         &features_obj, &thresholds_obj, &values_obj, &node_sample_weights_obj,
         &max_depth, &X_obj, &X_missing_obj, &y_obj, &R_obj, &R_missing_obj, &tree_limit, &base_offset_obj,
-        &out_contribs_obj, &feature_dependence, &model_output, &interactions
+        &out_contribs_obj, &feature_dependence, &model_output, &algorithm, &interactions
     )) return NULL;
 
     /* Interpret the input objects as numpy arrays. */
@@ -217,7 +218,7 @@ static PyObject *_cext_dense_tree_shap(PyObject *self, PyObject *args)
     );
     ExplanationDataset data = ExplanationDataset(X, X_missing, y, R, R_missing, num_X, M, num_R);
 
-    dense_tree_shap(trees, data, out_contribs, feature_dependence, model_output, interactions);
+    dense_tree_shap(trees, data, out_contribs, feature_dependence, model_output, algorithm, interactions);
 
     // retrieve return value before python cleanup of objects
     tfloat ret_value = (double)values[0];

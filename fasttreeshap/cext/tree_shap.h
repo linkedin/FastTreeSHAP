@@ -29,6 +29,12 @@ namespace FEATURE_DEPENDENCE {
     const unsigned global_path_dependent = 2;
 }
 
+namespace ALGORITHM {
+    const unsigned v0 = 0;
+    const unsigned v1 = 1;
+    const unsigned v2 = 2;
+}
+
 struct TreeEnsemble {
     int *children_left;
     int *children_right;
@@ -544,6 +550,519 @@ inline void tree_shap(const TreeEnsemble& tree, const ExplanationDataset &data,
     );
 
     delete[] unique_path_data;
+}
+
+
+// extend our decision path with a fraction of one and zero extensions
+// update unique_path and pweights for the feature of the last split
+inline void extend_path_v1(PathElement *unique_path, tfloat *pweights, unsigned unique_depth,
+                           unsigned unique_depth_pweights, tfloat zero_fraction, tfloat one_fraction,
+                           int feature_index) {
+    unique_path[unique_depth].feature_index = feature_index;
+    unique_path[unique_depth].zero_fraction = zero_fraction;
+    unique_path[unique_depth].one_fraction = one_fraction;
+    if (one_fraction != 0) {
+        // extend pweights iff the feature of the last split satisfies the threshold
+        pweights[unique_depth_pweights] = (unique_depth_pweights == 0 ? 1.0f : 0.0f);
+        for (int i = unique_depth_pweights - 1; i >= 0; i--) {
+            pweights[i + 1] += pweights[i] * (i + 1) / static_cast<tfloat>(unique_depth + 1);
+            pweights[i] *= zero_fraction * (unique_depth - i) / static_cast<tfloat>(unique_depth + 1);
+        }
+    } else {
+        for (int i = unique_depth_pweights - 1; i >= 0; i--) {
+            pweights[i] *= (unique_depth - i) / static_cast<tfloat>(unique_depth + 1);
+        }
+    }
+}
+
+// undo a previous extension of the decision path
+inline void unwind_path_v1(PathElement *unique_path, tfloat *pweights, unsigned unique_depth,
+                           unsigned unique_depth_pweights, unsigned path_index) {
+    const tfloat one_fraction = unique_path[path_index].one_fraction;
+    const tfloat zero_fraction = unique_path[path_index].zero_fraction;
+    tfloat next_one_portion = pweights[unique_depth_pweights];
+
+    if (one_fraction != 0) {
+        // shrink pweights iff the feature satisfies the threshold
+        for (int i = unique_depth_pweights - 1; i >= 0; --i) {
+            const tfloat tmp = pweights[i];
+            pweights[i] = next_one_portion * (unique_depth + 1) / static_cast<tfloat>(i + 1);
+            next_one_portion = tmp - pweights[i] * zero_fraction * (unique_depth - i)
+                               / static_cast<tfloat>(unique_depth + 1);
+        }
+    } else {
+        for (int i = unique_depth_pweights; i >= 0; --i) {
+            pweights[i] *= (unique_depth + 1) / static_cast<tfloat>(unique_depth - i);
+        }
+    }
+
+    for (unsigned i = path_index; i < unique_depth; ++i) {
+        unique_path[i].feature_index = unique_path[i+1].feature_index;
+        unique_path[i].zero_fraction = unique_path[i+1].zero_fraction;
+        unique_path[i].one_fraction = unique_path[i+1].one_fraction;
+    }
+}
+
+// determine what the total permuation weight would be if
+// we unwound a previous extension in the decision path (for feature satisfying the threshold)
+inline tfloat unwound_path_sum_v1(const PathElement *unique_path, const tfloat *pweights, unsigned unique_depth,
+                                  unsigned unique_depth_pweights, unsigned path_index) {
+    tfloat total = 0;
+    const tfloat zero_fraction = unique_path[path_index].zero_fraction;
+    tfloat next_one_portion = pweights[unique_depth_pweights];
+    for (int i = unique_depth_pweights - 1; i >= 0; --i) {
+        const tfloat tmp = next_one_portion / static_cast<tfloat>(i + 1);
+        total += tmp;
+        next_one_portion = pweights[i] - tmp * zero_fraction * (unique_depth - i);
+    }
+    return total * (unique_depth + 1);
+}
+
+// determine what the total permuation weight would be if
+// we unwound a previous extension in the decision path (for features not satisfying the thresholds)
+inline tfloat unwound_path_sum_zero_v1(const tfloat *pweights, unsigned unique_depth, unsigned unique_depth_pweights) {
+    tfloat total = 0;
+    if (unique_depth > unique_depth_pweights) {
+         for (int i = unique_depth_pweights; i >= 0; --i) {
+             total += pweights[i] / static_cast<tfloat>(unique_depth - i);
+         }
+    }
+    return total * (unique_depth + 1);
+}
+
+
+// recursive computation of SHAP values for a decision tree
+inline void tree_shap_recursive_v1(const unsigned num_outputs, const int *children_left,
+                                   const int *children_right,
+                                   const int *children_default, const int *features,
+                                   const tfloat *thresholds, const tfloat *values,
+                                   const tfloat *node_sample_weight,
+                                   const tfloat *x, const bool *x_missing, tfloat *phi,
+                                   unsigned node_index, unsigned unique_depth, unsigned unique_depth_pweights,
+                                   PathElement *parent_unique_path, tfloat *parent_pweights,
+                                   tfloat pweights_residual, tfloat parent_zero_fraction,
+                                   tfloat parent_one_fraction, int parent_feature_index,
+                                   int condition, unsigned condition_feature,
+                                   tfloat condition_fraction) {
+
+    // stop if we have no weight coming down to us
+    if (condition_fraction == 0) return;
+
+    // extend the unique path
+    PathElement *unique_path = parent_unique_path + unique_depth + 1;
+    std::copy(parent_unique_path, parent_unique_path + unique_depth + 1, unique_path);
+    tfloat *pweights = parent_pweights + unique_depth_pweights + 1;
+    std::copy(parent_pweights, parent_pweights + unique_depth_pweights + 1, pweights);
+
+    if (condition == 0 || condition_feature != static_cast<unsigned>(parent_feature_index)) {
+        extend_path_v1(unique_path, pweights, unique_depth, unique_depth_pweights, parent_zero_fraction,
+                       parent_one_fraction, parent_feature_index);
+        // update pweights_residual iff the feature of the last split does not satisfy the threshold
+        if (parent_one_fraction != 1) {
+            pweights_residual *= parent_zero_fraction;
+            unique_depth_pweights -= 1;
+        }
+    }
+    const unsigned split_index = features[node_index];
+
+    // leaf node
+    if (children_right[node_index] < 0) {
+        // pre-calculate w_zero for all features not satisfying the thresholds
+        const tfloat w_zero = unwound_path_sum_zero_v1(pweights, unique_depth, unique_depth_pweights);
+        const tfloat scale_zero = -w_zero * pweights_residual * condition_fraction;
+        for (unsigned i = 1; i <= unique_depth; ++i) {
+            const PathElement &el = unique_path[i];
+            const unsigned phi_offset = el.feature_index * num_outputs;
+            const unsigned values_offset = node_index * num_outputs;
+            // update contributions for features satisfying the thresholds and not satisfying the thresholds separately
+            if (el.one_fraction != 0) {
+               const tfloat w = unwound_path_sum_v1(unique_path, pweights, unique_depth, unique_depth_pweights, i);
+               const tfloat scale = w * pweights_residual * (1 - el.zero_fraction) * condition_fraction;
+               for (unsigned j = 0; j < num_outputs; ++j) {
+                   phi[phi_offset + j] += scale * values[values_offset + j];
+               }
+            } else {
+               for (unsigned j = 0; j < num_outputs; ++j) {
+                   phi[phi_offset + j] += scale_zero * values[values_offset + j];
+               }
+            }
+        }
+
+    // internal node
+    } else {
+        // find which branch is "hot" (meaning x would follow it)
+        unsigned hot_index = 0;
+        if (x_missing[split_index]) {
+            hot_index = children_default[node_index];
+        } else if (x[split_index] <= thresholds[node_index]) {
+            hot_index = children_left[node_index];
+        } else {
+            hot_index = children_right[node_index];
+        }
+        const unsigned cold_index = (static_cast<int>(hot_index) == children_left[node_index] ?
+                                        children_right[node_index] : children_left[node_index]);
+        const tfloat w = node_sample_weight[node_index];
+        const tfloat hot_zero_fraction = node_sample_weight[hot_index] / w;
+        const tfloat cold_zero_fraction = node_sample_weight[cold_index] / w;
+        tfloat incoming_zero_fraction = 1;
+        tfloat incoming_one_fraction = 1;
+
+        // see if we have already split on this feature,
+        // if so we undo that split so we can redo it for this node
+        unsigned path_index = 0;
+        for (; path_index <= unique_depth; ++path_index) {
+            if (static_cast<unsigned>(unique_path[path_index].feature_index) == split_index) break;
+        }
+        if (path_index != unique_depth + 1) {
+            incoming_zero_fraction = unique_path[path_index].zero_fraction;
+            incoming_one_fraction = unique_path[path_index].one_fraction;
+            unwind_path_v1(unique_path, pweights, unique_depth, unique_depth_pweights, path_index);
+            unique_depth -= 1;
+            // update pweights_residual iff the duplicated feature does not satisfy the threshold
+            if (incoming_one_fraction != 0.) {
+                unique_depth_pweights -= 1;
+            } else {
+                pweights_residual /= incoming_zero_fraction;
+            }
+        }
+
+        // divide up the condition_fraction among the recursive calls
+        tfloat hot_condition_fraction = condition_fraction;
+        tfloat cold_condition_fraction = condition_fraction;
+        if (condition > 0 && split_index == condition_feature) {
+            cold_condition_fraction = 0;
+            unique_depth -= 1;
+            unique_depth_pweights -= 1;
+        } else if (condition < 0 && split_index == condition_feature) {
+            hot_condition_fraction *= hot_zero_fraction;
+            cold_condition_fraction *= cold_zero_fraction;
+            unique_depth -= 1;
+            unique_depth_pweights -= 1;
+        }
+
+        tree_shap_recursive_v1(
+            num_outputs, children_left, children_right, children_default, features, thresholds, values,
+            node_sample_weight, x, x_missing, phi, hot_index, unique_depth + 1, unique_depth_pweights + 1,
+            unique_path, pweights, pweights_residual,
+            hot_zero_fraction * incoming_zero_fraction, incoming_one_fraction,
+            split_index, condition, condition_feature, hot_condition_fraction
+        );
+
+        tree_shap_recursive_v1(
+            num_outputs, children_left, children_right, children_default, features, thresholds, values,
+            node_sample_weight, x, x_missing, phi, cold_index, unique_depth + 1, unique_depth_pweights + 1,
+            unique_path, pweights, pweights_residual,
+            cold_zero_fraction * incoming_zero_fraction, 0,
+            split_index, condition, condition_feature, cold_condition_fraction
+        );
+    }
+}
+
+
+inline void tree_shap_v1(const TreeEnsemble& tree, const ExplanationDataset &data,
+                         tfloat *out_contribs, int condition, unsigned condition_feature) {
+
+    // update the reference value with the expected value of the tree's predictions
+    if (condition == 0) {
+        for (unsigned j = 0; j < tree.num_outputs; ++j) {
+            out_contribs[data.M * tree.num_outputs + j] += tree.values[j];
+        }
+    }
+
+    // pre-allocate space for the unique path data and pweights
+    const unsigned maxd = tree.max_depth + 2; // need a bit more space than the max depth
+    PathElement *unique_path_data = new PathElement[(maxd * (maxd + 1)) / 2];
+    tfloat *pweights = new tfloat[(maxd * (maxd + 1)) / 2];
+
+    tree_shap_recursive_v1(
+        tree.num_outputs, tree.children_left, tree.children_right, tree.children_default,
+        tree.features, tree.thresholds, tree.values, tree.node_sample_weights, data.X,
+        data.X_missing, out_contribs, 0, 0, 0, unique_path_data, pweights, 1, 1, 1, -1, condition,
+        condition_feature, 1
+    );
+
+    delete[] unique_path_data;
+    delete[] pweights;
+}
+
+
+// recursive computation of combination_sum (matrix S) for a decision tree
+inline void compute_combination_sum_recursive(const int *children_left, const int *children_right,
+                                              const int *features, const tfloat *node_sample_weight,
+                                              const int max_depth, tfloat *combination_sum, int *duplicated_node,
+                                              unsigned node_index, unsigned unique_depth,
+                                              int *parent_unique_depth_pweights, PathElement *parent_unique_path,
+                                              tfloat *parent_pweights, tfloat parent_zero_fraction,
+                                              int parent_feature_index, int *leaf_count) {
+
+    // extend the unique path
+    PathElement *unique_path = parent_unique_path + unique_depth;
+    std::copy(parent_unique_path, parent_unique_path + unique_depth, unique_path);
+    unique_path[unique_depth].feature_index = parent_feature_index;
+    unique_path[unique_depth].zero_fraction = parent_zero_fraction;
+
+    unsigned l;
+    int *unique_depth_pweights;
+    tfloat *pweights;
+    tfloat *t_pweights;
+
+    // extend pweights and update unique_depth_pweights
+    if (unique_depth == 0) {
+        l = 1;
+        unique_depth_pweights = parent_unique_depth_pweights;
+        unique_depth_pweights[0] = 0;
+        pweights = parent_pweights;
+        pweights[0] = 1.0f;
+    }
+    else {
+        l = static_cast<int>(round(pow(2, unique_depth - 1)));
+        unique_depth_pweights = parent_unique_depth_pweights + l;
+        std::copy(parent_unique_depth_pweights, parent_unique_depth_pweights + l, unique_depth_pweights);
+        std::copy(parent_unique_depth_pweights, parent_unique_depth_pweights + l, unique_depth_pweights + l);
+        pweights = parent_pweights + l * (max_depth + 1);
+        std::copy(parent_pweights, parent_pweights + l * (max_depth + 1), pweights);
+        std::copy(parent_pweights, parent_pweights + l * (max_depth + 1), pweights + l * (max_depth + 1));
+
+        for (unsigned t = 0; t < l; t++) {
+            t_pweights = pweights + t * (max_depth + 1);
+            for (int i = unique_depth_pweights[t] - 1; i >= 0; i--) {
+                t_pweights[i] *= (unique_depth - i) / static_cast<tfloat>(unique_depth + 1);
+            }
+            unique_depth_pweights[t] -= 1;
+        }
+        for (unsigned t = l; t < 2 * l; t++) {
+            t_pweights = pweights + t * (max_depth + 1);
+            t_pweights[unique_depth_pweights[t]] = 0.0f;
+            for (int i = unique_depth_pweights[t] - 1; i >= 0; i--) {
+                t_pweights[i + 1] += t_pweights[i] * (i + 1) / static_cast<tfloat>(unique_depth + 1);
+                t_pweights[i] *= parent_zero_fraction * (unique_depth - i) / static_cast<tfloat>(unique_depth + 1);
+            }
+        }
+    }
+
+    const unsigned split_index = features[node_index];
+
+    // leaf node
+    if (children_right[node_index] < 0) {
+        // calculate one row of combination_sum for the current path
+        tfloat *leaf_combination_sum = combination_sum + leaf_count[0] * static_cast<int>(round(pow(2, max_depth)));
+        for (unsigned t = 0; t < 2 * l - 1; t++) {
+            leaf_combination_sum[t] = 0;
+            t_pweights = pweights + t * (max_depth + 1);
+            for (int i = unique_depth_pweights[t]; i >= 0; i--) {
+                leaf_combination_sum[t] += t_pweights[i] / static_cast<tfloat>(unique_depth - i);
+            }
+            leaf_combination_sum[t] *= (unique_depth + 1);
+        }
+        leaf_count[0] += 1;
+    // internal node
+    } else {
+        const unsigned left_index = children_left[node_index];
+        const unsigned right_index = children_right[node_index];
+        const tfloat w = node_sample_weight[node_index];
+        const tfloat left_zero_fraction = node_sample_weight[left_index] / w;
+        const tfloat right_zero_fraction = node_sample_weight[right_index] / w;
+        tfloat incoming_zero_fraction = 1;
+
+        // see if we have already split on this feature,
+        // if so we undo that split so we can redo it for this node
+        unsigned path_index = 0;
+        for (; path_index <= unique_depth; ++path_index) {
+            if (static_cast<unsigned>(unique_path[path_index].feature_index) == split_index) break;
+        }
+        if (path_index != unique_depth + 1) {
+            duplicated_node[node_index] = path_index;  // record node index of duplicated feature
+            incoming_zero_fraction = unique_path[path_index].zero_fraction;
+
+            // shrink pweights and unique_path, and update unique_depth_pweights, given the duplicated feature
+            unsigned p = static_cast<int>(round(pow(2, path_index - 1)));
+            unsigned t = 0;
+            tfloat *k_pweights;
+            for (unsigned j = 0; j < 2 * l; j += 2 * p) {
+                for (unsigned k = j; k < j + p; k++) {
+                    t_pweights = pweights + t * (max_depth + 1);
+                    k_pweights = pweights + k * (max_depth + 1);
+                    for (int i = unique_depth_pweights[k]; i >= 0; i--) {
+                        t_pweights[i] = k_pweights[i] * (unique_depth + 1) / static_cast<tfloat>(unique_depth - i);
+                    }
+                    unique_depth_pweights[t] = unique_depth_pweights[k];
+                    t += 1;
+                }
+            }
+            for (unsigned i = path_index; i < unique_depth; ++i) {
+                unique_path[i].feature_index = unique_path[i + 1].feature_index;
+                unique_path[i].zero_fraction = unique_path[i + 1].zero_fraction;
+            }
+            unique_depth -= 1;
+        } else {
+            duplicated_node[node_index] = -1;
+        }
+
+        for (unsigned t = 0; t < 2 * l; t++) {
+            unique_depth_pweights[t] += 1;
+        }
+
+        compute_combination_sum_recursive(
+            children_left, children_right, features, node_sample_weight, max_depth, combination_sum,
+            duplicated_node, left_index, unique_depth + 1, unique_depth_pweights, unique_path, pweights,
+            incoming_zero_fraction * left_zero_fraction, split_index, leaf_count
+        );
+
+        compute_combination_sum_recursive(
+            children_left, children_right, features, node_sample_weight, max_depth, combination_sum,
+            duplicated_node, right_index, unique_depth + 1, unique_depth_pweights, unique_path, pweights,
+            incoming_zero_fraction * right_zero_fraction, split_index, leaf_count
+        );
+    }
+}
+
+
+// computation of combination_sum (matrix S) for a decision tree
+inline void compute_combination_sum(const TreeEnsemble& tree, tfloat *combination_sum, int *duplicated_node) {
+
+    // Pre-allocate space for the unique path data, pweights and unique_depth_pweights
+    const unsigned max_combinations = static_cast<int>(round(pow(2, tree.max_depth)));
+    int *unique_depth_pweights = new int[2 * max_combinations];
+    tfloat *pweights = new tfloat[2 * max_combinations * (tree.max_depth + 1)];
+    PathElement *unique_path_data = new PathElement[(tree.max_depth + 1) * (tree.max_depth + 2) / 2];
+    int *leaf_count = new int[1];
+    leaf_count[0] = 0;
+
+    compute_combination_sum_recursive(
+        tree.children_left, tree.children_right, tree.features, tree.node_sample_weights, tree.max_depth,
+        combination_sum, duplicated_node, 0, 0, unique_depth_pweights, unique_path_data, pweights, 1, -1, leaf_count
+    );
+
+    delete[] unique_depth_pweights;
+    delete[] pweights;
+    delete[] unique_path_data;
+    delete[] leaf_count;
+}
+
+
+// recursive computation of SHAP values for a decision tree
+inline void tree_shap_recursive_v2(const unsigned num_outputs, const int *children_left,
+                                   const int *children_right,
+                                   const int *children_default, const int *features,
+                                   const tfloat *thresholds, const tfloat *values,
+                                   const tfloat *node_sample_weight, const int max_depth,
+                                   const tfloat *combination_sum, const int *duplicated_node,
+                                   const tfloat *x, const bool *x_missing, tfloat *phi,
+                                   unsigned node_index, unsigned unique_depth,
+                                   PathElement *parent_unique_path, const int *ptwos,
+                                   tfloat pweights_residual, tfloat parent_zero_fraction,
+                                   tfloat parent_one_fraction, int parent_feature_index,
+                                   int *leaf_count) {
+
+    // extend the unique path
+    PathElement *unique_path = parent_unique_path + unique_depth;
+    std::copy(parent_unique_path, parent_unique_path + unique_depth, unique_path);
+
+    unique_path[unique_depth].feature_index = parent_feature_index;
+    unique_path[unique_depth].zero_fraction = parent_zero_fraction;
+    unique_path[unique_depth].one_fraction = parent_one_fraction;
+    // update pweights_residual iff the feature of the last split does not satisfy the threshold
+    if (parent_one_fraction != 1) {
+        pweights_residual *= parent_zero_fraction;
+    }
+
+    const unsigned split_index = features[node_index];
+
+    // leaf node
+    if (children_right[node_index] < 0) {
+        const tfloat *leaf_combination_sum = combination_sum + leaf_count[0] * ptwos[max_depth];
+        // use ptwos_sum to search in the row of combination_sum corresponding to the current path
+        unsigned ptwos_sum = 0;
+        for (unsigned i = 1; i <= unique_depth; ++i) {
+            if (unique_path[i].one_fraction != 0) {
+                ptwos_sum += ptwos[i - 1];
+            }
+        }
+        // update contributions for features satisfying the thresholds and not satisfying the thresholds separately
+        const unsigned values_offset = node_index * num_outputs;
+        const tfloat scale_zero = -leaf_combination_sum[ptwos_sum] * pweights_residual;
+        for (unsigned i = 1; i <= unique_depth; ++i) {
+            const PathElement &el = unique_path[i];
+            const unsigned phi_offset = el.feature_index * num_outputs;
+            const tfloat scale = (el.one_fraction != 0) ? leaf_combination_sum[ptwos_sum - ptwos[i - 1]] * \
+            pweights_residual * (1 - el.zero_fraction) : scale_zero;
+            for (unsigned j = 0; j < num_outputs; ++j) {
+                phi[phi_offset + j] += scale * values[values_offset + j];
+            }
+        }
+        leaf_count[0] += 1;
+    // internal node
+    } else {
+        const unsigned left_index = children_left[node_index];
+        const unsigned right_index = children_right[node_index];
+        const tfloat w = node_sample_weight[node_index];
+        const tfloat left_zero_fraction = node_sample_weight[left_index] / w;
+        const tfloat right_zero_fraction = node_sample_weight[right_index] / w;
+        tfloat incoming_zero_fraction = 1;
+        tfloat incoming_one_fraction = 1;
+
+        // see if we have already split on this feature,
+        // if so we undo that split so we can redo it for this node
+        const int path_index = duplicated_node[node_index];
+        if (path_index >= 0) {
+            incoming_zero_fraction = unique_path[path_index].zero_fraction;
+            incoming_one_fraction = unique_path[path_index].one_fraction;
+
+            for (unsigned i = path_index; i < unique_depth; ++i) {
+                unique_path[i].feature_index = unique_path[i + 1].feature_index;
+                unique_path[i].zero_fraction = unique_path[i + 1].zero_fraction;
+                unique_path[i].one_fraction = unique_path[i + 1].one_fraction;
+            }
+            unique_depth -= 1;
+            // update pweights_residual iff the duplicated feature does not satisfy the threshold
+            if (incoming_one_fraction != 1.) {
+                pweights_residual /= incoming_zero_fraction;
+            }
+        }
+
+        tree_shap_recursive_v2(
+            num_outputs, children_left, children_right, children_default, features, thresholds, values,
+            node_sample_weight, max_depth, combination_sum, duplicated_node, x, x_missing, phi,
+            left_index, unique_depth + 1, unique_path, ptwos, pweights_residual,
+            left_zero_fraction * incoming_zero_fraction,
+            incoming_one_fraction * int(x[split_index] <= thresholds[node_index]),
+            split_index, leaf_count
+        );
+
+        tree_shap_recursive_v2(
+            num_outputs, children_left, children_right, children_default, features, thresholds, values,
+            node_sample_weight, max_depth, combination_sum, duplicated_node, x, x_missing, phi,
+            right_index, unique_depth + 1, unique_path, ptwos, pweights_residual,
+            right_zero_fraction * incoming_zero_fraction,
+            incoming_one_fraction * int(x[split_index] > thresholds[node_index]),
+            split_index, leaf_count
+        );
+    }
+}
+
+
+inline void tree_shap_v2(const TreeEnsemble& tree, const tfloat *combination_sum, const int *duplicated_node,
+                         const int *ptwos, const ExplanationDataset &data, tfloat *out_contribs) {
+
+    // update the reference value with the expected value of the tree's predictions
+    for (unsigned j = 0; j < tree.num_outputs; ++j) {
+        out_contribs[data.M * tree.num_outputs + j] += tree.values[j];
+    }
+
+    // pre-allocate space for the unique path data
+    PathElement *unique_path_data = new PathElement[(tree.max_depth + 1) * (tree.max_depth + 2) / 2];
+    int *leaf_count = new int[1];
+    leaf_count[0] = 0;
+
+    tree_shap_recursive_v2(
+        tree.num_outputs, tree.children_left, tree.children_right, tree.children_default,
+        tree.features, tree.thresholds, tree.values, tree.node_sample_weights, tree.max_depth,
+        combination_sum, duplicated_node, data.X, data.X_missing, out_contribs, 0, 0,
+        unique_path_data, ptwos, 1, 1, 1, -1, leaf_count
+    );
+
+    delete[] unique_path_data;
+    delete[] leaf_count;
 }
 
 
@@ -1266,24 +1785,79 @@ inline void dense_independent(const TreeEnsemble& trees, const ExplanationDatase
  * This runs Tree SHAP with a per tree path conditional dependence assumption.
  */
 inline void dense_tree_path_dependent(const TreeEnsemble& trees, const ExplanationDataset &data,
-                               tfloat *out_contribs, tfloat transform(const tfloat, const tfloat)) {
+                               tfloat *out_contribs, tfloat transform(const tfloat, const tfloat), const int algorithm) {
     tfloat *instance_out_contribs;
     TreeEnsemble tree;
     ExplanationDataset instance;
 
-    // build explanation for each sample
+    // dispatch to the correct algorithm version
+    switch (algorithm) {
+        case ALGORITHM::v0:
+            // build explanation for each sample
+            for (unsigned i = 0; i < data.num_X; ++i) {
+                instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
+                data.get_x_instance(instance, i);
+
+                // aggregate the effect of explaining each tree
+                // (this works because of the linearity property of Shapley values)
+                for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                    trees.get_tree(tree, j);
+                    tree_shap(tree, instance, instance_out_contribs, 0, 0);
+                }
+            }
+            return;
+
+        case ALGORITHM::v1:
+            // build explanation for each sample
+            for (unsigned i = 0; i < data.num_X; ++i) {
+                instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
+                data.get_x_instance(instance, i);
+
+                // aggregate the effect of explaining each tree
+                // (this works because of the linearity property of Shapley values)
+                for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                    trees.get_tree(tree, j);
+                    tree_shap_v1(tree, instance, instance_out_contribs, 0, 0);
+                }
+            }
+            return;
+
+        case ALGORITHM::v2:
+            // pre-allocate space for combination sum and duplicated node
+            const unsigned max_leaves = (trees.max_nodes + 1) / 2;
+            const unsigned max_combinations = static_cast<int>(round(pow(2, trees.max_depth)));
+            tfloat *combination_sum = new tfloat[max_leaves * max_combinations];
+            int *duplicated_node = new int[trees.max_nodes];
+
+            // pre-compute values of powers of two
+            int *ptwos = new int[trees.max_depth + 1];
+            ptwos[0] = 1;
+            for (unsigned i = 1; i < trees.max_depth + 1; i++) {
+              ptwos[i] = ptwos[i - 1] * 2;
+            }
+
+            // compute combination sum for each tree and aggregate the effect of explaining each tree
+            // (this works because of the linearity property of Shapley values)
+            for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                trees.get_tree(tree, j);
+                compute_combination_sum(tree, combination_sum, duplicated_node);
+
+                // build explanation for each sample
+                for (unsigned i = 0; i < data.num_X; ++i) {
+                    instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
+                    data.get_x_instance(instance, i);
+                    tree_shap_v2(tree, combination_sum, duplicated_node, ptwos, instance, instance_out_contribs);
+                }
+            }
+            delete[] combination_sum;
+            delete[] duplicated_node;
+            delete[] ptwos;
+            return;
+    }
+
+    // apply the base offset to the bias term
     for (unsigned i = 0; i < data.num_X; ++i) {
         instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
-        data.get_x_instance(instance, i);
-
-        // aggregate the effect of explaining each tree
-        // (this works because of the linearity property of Shapley values)
-        for (unsigned j = 0; j < trees.tree_limit; ++j) {
-            trees.get_tree(tree, j);
-            tree_shap(tree, instance, instance_out_contribs, 0, 0);
-        }
-
-        // apply the base offset to the bias term
         for (unsigned j = 0; j < trees.num_outputs; ++j) {
             instance_out_contribs[data.M * trees.num_outputs + j] += trees.base_offset[j];
         }
@@ -1308,7 +1882,7 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
 
 inline void dense_tree_interactions_path_dependent(const TreeEnsemble& trees, const ExplanationDataset &data,
                                             tfloat *out_contribs,
-                                            tfloat transform(const tfloat, const tfloat)) {
+                                            tfloat transform(const tfloat, const tfloat), const int algorithm) {
 
     // build a list of all the unique features in each tree
     int amount_of_unique_features = min(data.M, trees.max_nodes);
@@ -1336,50 +1910,108 @@ inline void dense_tree_interactions_path_dependent(const TreeEnsemble& trees, co
     tfloat *diag_contribs = new tfloat[contrib_row_size];
     tfloat *on_contribs = new tfloat[contrib_row_size];
     tfloat *off_contribs = new tfloat[contrib_row_size];
-    for (unsigned i = 0; i < data.num_X; ++i) {
-        instance_out_contribs = out_contribs + i * (data.M + 1) * contrib_row_size;
-        data.get_x_instance(instance, i);
 
-        // aggregate the effect of explaining each tree
-        // (this works because of the linearity property of Shapley values)
-        std::fill(diag_contribs, diag_contribs + contrib_row_size, 0);
-        for (unsigned j = 0; j < trees.tree_limit; ++j) {
-            trees.get_tree(tree, j);
-            tree_shap(tree, instance, diag_contribs, 0, 0);
+    // dispatch to the correct algorithm version
+    switch (algorithm) {
+        case ALGORITHM::v0:
+            for (unsigned i = 0; i < data.num_X; ++i) {
+                instance_out_contribs = out_contribs + i * (data.M + 1) * contrib_row_size;
+                data.get_x_instance(instance, i);
 
-            const int *unique_features_row = unique_features + j * amount_of_unique_features;
-            for (unsigned k = 0; k < amount_of_unique_features; ++k) {
-                const int ind = unique_features_row[k];
-                if (ind < 0) break; // < 0 means we have seen all the features for this tree
+                // aggregate the effect of explaining each tree
+                // (this works because of the linearity property of Shapley values)
+                std::fill(diag_contribs, diag_contribs + contrib_row_size, 0);
+                for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                    trees.get_tree(tree, j);
+                    tree_shap(tree, instance, diag_contribs, 0, 0);
 
-                // compute the shap value with this feature held on and off
-                std::fill(on_contribs, on_contribs + contrib_row_size, 0);
-                std::fill(off_contribs, off_contribs + contrib_row_size, 0);
-                tree_shap(tree, instance, on_contribs, 1, ind);
-                tree_shap(tree, instance, off_contribs, -1, ind);
+                    const int *unique_features_row = unique_features + j * amount_of_unique_features;
+                    for (unsigned k = 0; k < amount_of_unique_features; ++k) {
+                        const int ind = unique_features_row[k];
+                        if (ind < 0) break; // < 0 means we have seen all the features for this tree
 
-                // save the difference between on and off as the interaction value
-                for (unsigned l = 0; l < contrib_row_size; ++l) {
-                    const tfloat val = (on_contribs[l] - off_contribs[l]) / 2;
-                    instance_out_contribs[ind * contrib_row_size + l] += val;
-                    diag_contribs[l] -= val;
+                        // compute the shap value with this feature held on and off
+                        std::fill(on_contribs, on_contribs + contrib_row_size, 0);
+                        std::fill(off_contribs, off_contribs + contrib_row_size, 0);
+                        tree_shap(tree, instance, on_contribs, 1, ind);
+                        tree_shap(tree, instance, off_contribs, -1, ind);
+
+                        // save the difference between on and off as the interaction value
+                        for (unsigned l = 0; l < contrib_row_size; ++l) {
+                            const tfloat val = (on_contribs[l] - off_contribs[l]) / 2;
+                            instance_out_contribs[ind * contrib_row_size + l] += val;
+                            diag_contribs[l] -= val;
+                        }
+                    }
+                }
+
+                // set the diagonal
+                for (unsigned j = 0; j < data.M + 1; ++j) {
+                    const unsigned offset = j * contrib_row_size + j * trees.num_outputs;
+                    for (unsigned k = 0; k < trees.num_outputs; ++k) {
+                        instance_out_contribs[offset + k] = diag_contribs[j * trees.num_outputs + k];
+                    }
+                }
+
+                // apply the base offset to the bias term
+                const unsigned last_ind = (data.M * (data.M + 1) + data.M) * trees.num_outputs;
+                for (unsigned j = 0; j < trees.num_outputs; ++j) {
+                    instance_out_contribs[last_ind + j] += trees.base_offset[j];
                 }
             }
-        }
+            return;
 
-        // set the diagonal
-        for (unsigned j = 0; j < data.M + 1; ++j) {
-            const unsigned offset = j * contrib_row_size + j * trees.num_outputs;
-            for (unsigned k = 0; k < trees.num_outputs; ++k) {
-                instance_out_contribs[offset + k] = diag_contribs[j * trees.num_outputs + k];
+        case ALGORITHM::v1:
+            for (unsigned i = 0; i < data.num_X; ++i) {
+                instance_out_contribs = out_contribs + i * (data.M + 1) * contrib_row_size;
+                data.get_x_instance(instance, i);
+
+                // aggregate the effect of explaining each tree
+                // (this works because of the linearity property of Shapley values)
+                std::fill(diag_contribs, diag_contribs + contrib_row_size, 0);
+                for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                    trees.get_tree(tree, j);
+                    tree_shap_v1(tree, instance, diag_contribs, 0, 0);
+
+                    const int *unique_features_row = unique_features + j * amount_of_unique_features;
+                    for (unsigned k = 0; k < amount_of_unique_features; ++k) {
+                        const int ind = unique_features_row[k];
+                        if (ind < 0) break; // < 0 means we have seen all the features for this tree
+
+                        // compute the shap value with this feature held on and off
+                        std::fill(on_contribs, on_contribs + contrib_row_size, 0);
+                        std::fill(off_contribs, off_contribs + contrib_row_size, 0);
+                        tree_shap_v1(tree, instance, on_contribs, 1, ind);
+                        tree_shap_v1(tree, instance, off_contribs, -1, ind);
+
+                        // save the difference between on and off as the interaction value
+                        for (unsigned l = 0; l < contrib_row_size; ++l) {
+                            const tfloat val = (on_contribs[l] - off_contribs[l]) / 2;
+                            instance_out_contribs[ind * contrib_row_size + l] += val;
+                            diag_contribs[l] -= val;
+                        }
+                    }
+                }
+
+                // set the diagonal
+                for (unsigned j = 0; j < data.M + 1; ++j) {
+                    const unsigned offset = j * contrib_row_size + j * trees.num_outputs;
+                    for (unsigned k = 0; k < trees.num_outputs; ++k) {
+                        instance_out_contribs[offset + k] = diag_contribs[j * trees.num_outputs + k];
+                    }
+                }
+
+                // apply the base offset to the bias term
+                const unsigned last_ind = (data.M * (data.M + 1) + data.M) * trees.num_outputs;
+                for (unsigned j = 0; j < trees.num_outputs; ++j) {
+                    instance_out_contribs[last_ind + j] += trees.base_offset[j];
+                }
             }
-        }
+            return;
 
-        // apply the base offset to the bias term
-        const unsigned last_ind = (data.M * (data.M + 1) + data.M) * trees.num_outputs;
-        for (unsigned j = 0; j < trees.num_outputs; ++j) {
-            instance_out_contribs[last_ind + j] += trees.base_offset[j];
-        }
+        case ALGORITHM::v2:
+            std::cerr << "ALGORITHM::v2 does not support interactions!\n";
+            return;
     }
 
     delete[] diag_contribs;
@@ -1433,7 +2065,7 @@ inline void dense_global_path_dependent(const TreeEnsemble& trees, const Explana
  * The main method for computing Tree SHAP on models using dense data.
  */
 inline void dense_tree_shap(const TreeEnsemble& trees, const ExplanationDataset &data, tfloat *out_contribs,
-                     const int feature_dependence, unsigned model_transform, bool interactions) {
+                     const int feature_dependence, unsigned model_transform, const int algorithm, bool interactions) {
 
     // see what transform (if any) we have
     transform_f transform = get_transform(model_transform);
@@ -1447,8 +2079,8 @@ inline void dense_tree_shap(const TreeEnsemble& trees, const ExplanationDataset 
             return;
         
         case FEATURE_DEPENDENCE::tree_path_dependent:
-            if (interactions) dense_tree_interactions_path_dependent(trees, data, out_contribs, transform);
-            else dense_tree_path_dependent(trees, data, out_contribs, transform);
+            if (interactions) dense_tree_interactions_path_dependent(trees, data, out_contribs, transform, algorithm);
+            else dense_tree_path_dependent(trees, data, out_contribs, transform, algorithm);
             return;
 
         case FEATURE_DEPENDENCE::global_path_dependent:
