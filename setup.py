@@ -211,7 +211,7 @@ def run_setup(with_binary, test_xgboost, test_lightgbm, test_catboost, test_spar
         url='http://github.com/linkedin/fasttreeshap',
         author='Jilei Yang',
         author_email='jlyang@linkedin.com',
-        license='MIT',
+        license='BSD 2-CLAUSE',
         packages=[
             'fasttreeshap', 'fasttreeshap.explainers', 'fasttreeshap.explainers.other',
             'fasttreeshap.explainers._deep', 'fasttreeshap.plots', 'fasttreeshap.plots.colors',
@@ -222,7 +222,7 @@ def run_setup(with_binary, test_xgboost, test_lightgbm, test_catboost, test_spar
         cmdclass={'build_ext': build_ext},
         setup_requires=['numpy'],
         install_requires=['numpy', 'scipy', 'scikit-learn', 'pandas', 'tqdm>4.25.0', # numpy versions are for numba
-                          'packaging>20.9', 'slicer==0.0.7', 'numba', 'cloudpickle'],
+                          'packaging>20.9', 'slicer==0.0.7', 'numba', 'cloudpickle', 'psutil', 'shap'],
         extras_require=extras_require,
         ext_modules=ext_modules,
         classifiers=[
