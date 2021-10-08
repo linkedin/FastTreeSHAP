@@ -105,7 +105,7 @@ class Tree(Explainer):
             Currently the probability and logloss options are only supported when feature_dependence="independent".
 
         shortcut: True (default) or False
-            whether to use the C++ version of TreeSHAP embedded in XGBoost, LightGBM, and CatBoost packages directly
+            Whether to use the C++ version of TreeSHAP embedded in XGBoost, LightGBM, and CatBoost packages directly
             when computing SHAP values for XGBoost, LightGBM, and CatBoost models and when computing SHAP interaction
             values for XGBoost models.
 
@@ -366,6 +366,7 @@ class Tree(Explainer):
         else:
             algorithm = self.algorithm
             if algorithm == "v2":
+                # check if memory constraint is satisfied
                 try:
                     max_leaves = (max(self.model.num_nodes) + 1) / 2
                     max_combinations = 2**self.model.max_depth
@@ -378,7 +379,6 @@ class Tree(Explainer):
                 if not memory_check:
                     warnings.warn("There may exist memory issue for algorithm v2. Switched to algorithm v1.")
                     algorithm = "v1"
-
 
         # shortcut using the C++ version of Tree SHAP in XGBoost, LightGBM, and CatBoost
         if self.feature_perturbation == "tree_path_dependent" and self.model.model_type != "internal" and self.data is None and self.shortcut:

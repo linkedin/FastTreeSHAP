@@ -1,8 +1,11 @@
 /**
  * Fast recursive computation of SHAP values in trees.
  * See https://arxiv.org/abs/1802.03888 for details.
- *
  * Scott Lundberg, 2018 (independent algorithm courtesy of Hugh Chen 2018)
+ *
+ * Fast TreeSHAP algorithm v1 and Fast TreeSHAP algorithm v2.
+ * See https://arxiv.org/abs/2109.09847 for details.
+ * Jilei Yang, 2021
  */
 
 #include <algorithm>
@@ -674,7 +677,7 @@ inline void tree_shap_recursive_v1(const unsigned num_outputs, const int *childr
             const PathElement &el = unique_path[i];
             const unsigned phi_offset = el.feature_index * num_outputs;
             const unsigned values_offset = node_index * num_outputs;
-            // update contributions for features satisfying the thresholds and not satisfying the thresholds separately
+            // update contributions to SHAP values for features satisfying the thresholds and not satisfying the thresholds separately
             if (el.one_fraction != 0) {
                const tfloat w = unwound_path_sum_v1(unique_path, pweights, unique_depth, unique_depth_pweights, i);
                const tfloat scale = w * pweights_residual * (1 - el.zero_fraction) * condition_fraction;
@@ -978,7 +981,7 @@ inline void tree_shap_recursive_v2(const unsigned num_outputs, const int *childr
                 ptwos_sum += ptwos[i - 1];
             }
         }
-        // update contributions for features satisfying the thresholds and not satisfying the thresholds separately
+        // update contributions to SHAP values for features satisfying the thresholds and not satisfying the thresholds separately
         const unsigned values_offset = node_index * num_outputs;
         const tfloat scale_zero = -leaf_combination_sum[ptwos_sum] * pweights_residual;
         for (unsigned i = 1; i <= unique_depth; ++i) {

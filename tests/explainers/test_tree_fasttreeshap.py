@@ -85,7 +85,7 @@ def test_fasttreeshap_xgboost_interaction():
     assert np.allclose(shap_interaction_values_v0, shap_interaction_values_v1)
 
 
-def test_fasttreeshap_xgboost_sklearn():
+def test_fasttreeshap_sklearn_interaction():
 
     # train model
     X, y = fasttreeshap.datasets.boston()
