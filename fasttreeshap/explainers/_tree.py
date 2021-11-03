@@ -350,15 +350,7 @@ class Tree(Explainer):
             num_samples_threshold = 2**(self.model.max_depth + 1) / self.model.max_depth
             num_samples_check = (num_samples >= num_samples_threshold)
             # check if memory constraint is satisfied
-            try:
-                max_leaves = (max(self.model.num_nodes) + 1) / 2
-                max_combinations = 2**self.model.max_depth
-                memory_usage = max_leaves * max_combinations * 8
-                import psutil
-                memory_tolerance = 0.75 * psutil.virtual_memory().total
-                memory_check = (memory_usage <= memory_tolerance)
-            except:
-                memory_check = (self.model.max_depth <= 16)
+            memory_check = self._memory_check()
             if num_samples_check and memory_check:
                 algorithm = "v2"
             else:
@@ -367,15 +359,7 @@ class Tree(Explainer):
             algorithm = self.algorithm
             if algorithm == "v2":
                 # check if memory constraint is satisfied
-                try:
-                    max_leaves = (max(self.model.num_nodes) + 1) / 2
-                    max_combinations = 2**self.model.max_depth
-                    memory_usage = max_leaves * max_combinations * 8
-                    import psutil
-                    memory_tolerance = 0.75 * psutil.virtual_memory().total
-                    memory_check = (memory_usage <= memory_tolerance)
-                except:
-                    memory_check = (self.model.max_depth <= 16)
+                memory_check = self._memory_check()
                 if not memory_check:
                     warnings.warn("There may exist memory issue for algorithm v2. Switched to algorithm v1.")
                     algorithm = "v1"
@@ -471,6 +455,21 @@ class Tree(Explainer):
             self.assert_additivity(out, self.model.predict(X))
 
         return out
+
+
+    # check if memory constraint is satisfied
+    def _memory_check(self):
+        try:
+            max_leaves = (max(self.model.num_nodes) + 1) / 2
+            max_combinations = 2**self.model.max_depth
+            memory_usage = max_leaves * max_combinations * 8
+            import psutil
+            memory_tolerance = 0.75 * psutil.virtual_memory().total
+            memory_check = (memory_usage <= memory_tolerance)
+        except:
+            memory_check = (self.model.max_depth <= 16)
+        return memory_check
+
 
     # we pull off the last column and keep it as our expected_value
     def _get_shap_output(self, phi, flat_output):
