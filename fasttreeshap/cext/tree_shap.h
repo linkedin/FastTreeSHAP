@@ -1917,62 +1917,104 @@ inline void dense_tree_interactions_path_dependent(const TreeEnsemble& trees, co
     // dispatch to the correct algorithm version
     switch (algorithm) {
         case ALGORITHM::v0:
-            tree_shap_func = tree_shap;
+            for (unsigned i = 0; i < data.num_X; ++i) {
+                instance_out_contribs = out_contribs + i * (data.M + 1) * contrib_row_size;
+                data.get_x_instance(instance, i);
+
+                // aggregate the effect of explaining each tree
+                // (this works because of the linearity property of Shapley values)
+                std::fill(diag_contribs, diag_contribs + contrib_row_size, 0);
+                for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                    trees.get_tree(tree, j);
+                    tree_shap(tree, instance, diag_contribs, 0, 0);
+
+                    const int *unique_features_row = unique_features + j * amount_of_unique_features;
+                    for (unsigned k = 0; k < amount_of_unique_features; ++k) {
+                        const int ind = unique_features_row[k];
+                        if (ind < 0) break; // < 0 means we have seen all the features for this tree
+
+                        // compute the shap value with this feature held on and off
+                        std::fill(on_contribs, on_contribs + contrib_row_size, 0);
+                        std::fill(off_contribs, off_contribs + contrib_row_size, 0);
+                        tree_shap(tree, instance, on_contribs, 1, ind);
+                        tree_shap(tree, instance, off_contribs, -1, ind);
+
+                        // save the difference between on and off as the interaction value
+                        for (unsigned l = 0; l < contrib_row_size; ++l) {
+                            const tfloat val = (on_contribs[l] - off_contribs[l]) / 2;
+                            instance_out_contribs[ind * contrib_row_size + l] += val;
+                            diag_contribs[l] -= val;
+                        }
+                    }
+                }
+
+                // set the diagonal
+                for (unsigned j = 0; j < data.M + 1; ++j) {
+                    const unsigned offset = j * contrib_row_size + j * trees.num_outputs;
+                    for (unsigned k = 0; k < trees.num_outputs; ++k) {
+                        instance_out_contribs[offset + k] = diag_contribs[j * trees.num_outputs + k];
+                    }
+                }
+
+                // apply the base offset to the bias term
+                const unsigned last_ind = (data.M * (data.M + 1) + data.M) * trees.num_outputs;
+                for (unsigned j = 0; j < trees.num_outputs; ++j) {
+                    instance_out_contribs[last_ind + j] += trees.base_offset[j];
+                }
+            }
             return;
 
         case ALGORITHM::v1:
-            tree_shap_func = tree_shap_v1;
+            for (unsigned i = 0; i < data.num_X; ++i) {
+                instance_out_contribs = out_contribs + i * (data.M + 1) * contrib_row_size;
+                data.get_x_instance(instance, i);
+
+                // aggregate the effect of explaining each tree
+                // (this works because of the linearity property of Shapley values)
+                std::fill(diag_contribs, diag_contribs + contrib_row_size, 0);
+                for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                    trees.get_tree(tree, j);
+                    tree_shap_v1(tree, instance, diag_contribs, 0, 0);
+
+                    const int *unique_features_row = unique_features + j * amount_of_unique_features;
+                    for (unsigned k = 0; k < amount_of_unique_features; ++k) {
+                        const int ind = unique_features_row[k];
+                        if (ind < 0) break; // < 0 means we have seen all the features for this tree
+
+                        // compute the shap value with this feature held on and off
+                        std::fill(on_contribs, on_contribs + contrib_row_size, 0);
+                        std::fill(off_contribs, off_contribs + contrib_row_size, 0);
+                        tree_shap_v1(tree, instance, on_contribs, 1, ind);
+                        tree_shap_v1(tree, instance, off_contribs, -1, ind);
+
+                        // save the difference between on and off as the interaction value
+                        for (unsigned l = 0; l < contrib_row_size; ++l) {
+                            const tfloat val = (on_contribs[l] - off_contribs[l]) / 2;
+                            instance_out_contribs[ind * contrib_row_size + l] += val;
+                            diag_contribs[l] -= val;
+                        }
+                    }
+                }
+
+                // set the diagonal
+                for (unsigned j = 0; j < data.M + 1; ++j) {
+                    const unsigned offset = j * contrib_row_size + j * trees.num_outputs;
+                    for (unsigned k = 0; k < trees.num_outputs; ++k) {
+                        instance_out_contribs[offset + k] = diag_contribs[j * trees.num_outputs + k];
+                    }
+                }
+
+                // apply the base offset to the bias term
+                const unsigned last_ind = (data.M * (data.M + 1) + data.M) * trees.num_outputs;
+                for (unsigned j = 0; j < trees.num_outputs; ++j) {
+                    instance_out_contribs[last_ind + j] += trees.base_offset[j];
+                }
+            }
             return;
 
         case ALGORITHM::v2:
             std::cerr << "ALGORITHM::v2 does not support interactions!\n";
             return;
-    }
-
-    for (unsigned i = 0; i < data.num_X; ++i) {
-        instance_out_contribs = out_contribs + i * (data.M + 1) * contrib_row_size;
-        data.get_x_instance(instance, i);
-
-        // aggregate the effect of explaining each tree
-        // (this works because of the linearity property of Shapley values)
-        std::fill(diag_contribs, diag_contribs + contrib_row_size, 0);
-        for (unsigned j = 0; j < trees.tree_limit; ++j) {
-            trees.get_tree(tree, j);
-            tree_shap_func(tree, instance, diag_contribs, 0, 0);
-
-            const int *unique_features_row = unique_features + j * amount_of_unique_features;
-            for (unsigned k = 0; k < amount_of_unique_features; ++k) {
-                const int ind = unique_features_row[k];
-                if (ind < 0) break; // < 0 means we have seen all the features for this tree
-
-                // compute the shap value with this feature held on and off
-                std::fill(on_contribs, on_contribs + contrib_row_size, 0);
-                std::fill(off_contribs, off_contribs + contrib_row_size, 0);
-                tree_shap_func(tree, instance, on_contribs, 1, ind);
-                tree_shap_func(tree, instance, off_contribs, -1, ind);
-
-                // save the difference between on and off as the interaction value
-                for (unsigned l = 0; l < contrib_row_size; ++l) {
-                    const tfloat val = (on_contribs[l] - off_contribs[l]) / 2;
-                    instance_out_contribs[ind * contrib_row_size + l] += val;
-                    diag_contribs[l] -= val;
-                }
-            }
-        }
-
-        // set the diagonal
-        for (unsigned j = 0; j < data.M + 1; ++j) {
-            const unsigned offset = j * contrib_row_size + j * trees.num_outputs;
-            for (unsigned k = 0; k < trees.num_outputs; ++k) {
-                instance_out_contribs[offset + k] = diag_contribs[j * trees.num_outputs + k];
-            }
-        }
-
-        // apply the base offset to the bias term
-        const unsigned last_ind = (data.M * (data.M + 1) + data.M) * trees.num_outputs;
-        for (unsigned j = 0; j < trees.num_outputs; ++j) {
-            instance_out_contribs[last_ind + j] += trees.base_offset[j];
-        }
     }
 
     delete[] diag_contribs;
