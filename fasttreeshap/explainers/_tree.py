@@ -464,7 +464,7 @@ class Tree(Explainer):
             max_combinations = 2**self.model.max_depth
             memory_usage = max_leaves * max_combinations * 8
             import psutil
-            memory_tolerance = 0.75 * psutil.virtual_memory().total
+            memory_tolerance = 0.25 * psutil.virtual_memory().total
             memory_check = (memory_usage <= memory_tolerance)
         except:
             memory_check = (self.model.max_depth <= 16)
