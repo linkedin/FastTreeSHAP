@@ -126,19 +126,27 @@ def compile_cuda_module(host_args):
     return 'build', '_cext_gpu'
 
 
-def run_setup(with_binary, test_xgboost, test_lightgbm, test_catboost, test_spark, test_pyod,
+def run_setup(with_binary, with_openmp, test_xgboost, test_lightgbm, test_catboost, test_spark, test_pyod,
               with_cuda, test_transformers, test_pytorch, test_sentencepiece, test_opencv):
     ext_modules = []
     if with_binary:
         compile_args = []
+        link_args = []
         if sys.platform == 'zos':
             compile_args.append('-qlonglong')
         if sys.platform == 'win32':
             compile_args.append('/MD')
+        if with_openmp:
+            if sys.platform == "darwin":
+                compile_args.append('-Xpreprocessor')
+                link_args.append('-lomp')
+            else:
+                link_args.append('-fopenmp')
+            compile_args.append('-fopenmp')
 
         ext_modules.append(
             Extension('fasttreeshap._cext', sources=['fasttreeshap/cext/_cext.cc'],
-                      extra_compile_args=compile_args))
+                      extra_compile_args=compile_args, extra_link_args=link_args))
     if with_cuda:
         try:
             cuda_home, nvcc = get_cuda_path()
@@ -285,7 +293,7 @@ def try_run_setup(**kwargs):
 # we seem to need this import guard for appveyor
 if __name__ == "__main__":
     try_run_setup(
-        with_binary=True, test_xgboost=True, test_lightgbm=True, test_catboost=True,
+        with_binary=True, with_openmp=True, test_xgboost=True, test_lightgbm=True, test_catboost=True,
         test_spark=True, test_pyod=True, with_cuda=True, test_transformers=True, test_pytorch=True,
         test_sentencepiece=True, test_opencv=True
     )

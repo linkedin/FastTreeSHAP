@@ -36,6 +36,8 @@ namespace ALGORITHM {
     const unsigned v0 = 0;
     const unsigned v1 = 1;
     const unsigned v2 = 2;
+    const unsigned v2_1 = 3;
+    const unsigned v2_2 = 4;
 }
 
 struct TreeEnsemble {
@@ -671,23 +673,34 @@ inline void tree_shap_recursive_v1(const unsigned num_outputs, const int *childr
     // leaf node
     if (children_right[node_index] < 0) {
         // pre-calculate w_zero for all features not satisfying the thresholds
+        const unsigned values_offset = node_index * num_outputs;
+        unsigned values_nonzero_ind = 0;
+        unsigned values_nonzero_count = 0;
+        for (unsigned j = 0; j < num_outputs; ++j) {
+            if (values[values_offset + j] != 0) {
+                values_nonzero_ind = j;
+                values_nonzero_count++;
+            }
+        }
         const tfloat w_zero = unwound_path_sum_zero_v1(pweights, unique_depth, unique_depth_pweights);
         const tfloat scale_zero = -w_zero * pweights_residual * condition_fraction;
+        tfloat scale;
         for (unsigned i = 1; i <= unique_depth; ++i) {
             const PathElement &el = unique_path[i];
             const unsigned phi_offset = el.feature_index * num_outputs;
-            const unsigned values_offset = node_index * num_outputs;
             // update contributions to SHAP values for features satisfying the thresholds and not satisfying the thresholds separately
             if (el.one_fraction != 0) {
-               const tfloat w = unwound_path_sum_v1(unique_path, pweights, unique_depth, unique_depth_pweights, i);
-               const tfloat scale = w * pweights_residual * (1 - el.zero_fraction) * condition_fraction;
-               for (unsigned j = 0; j < num_outputs; ++j) {
-                   phi[phi_offset + j] += scale * values[values_offset + j];
-               }
+                const tfloat w = unwound_path_sum_v1(unique_path, pweights, unique_depth, unique_depth_pweights, i);
+                scale = w * pweights_residual * (1 - el.zero_fraction) * condition_fraction;
             } else {
-               for (unsigned j = 0; j < num_outputs; ++j) {
-                   phi[phi_offset + j] += scale_zero * values[values_offset + j];
-               }
+                scale = scale_zero;
+            }
+            if (values_nonzero_count == 1) {
+                phi[phi_offset + values_nonzero_ind] += scale * values[values_offset + values_nonzero_ind];
+            } else {
+                for (unsigned j = 0; j < num_outputs; ++j) {
+                    phi[phi_offset + j] += scale * values[values_offset + j];
+                }
             }
         }
 
@@ -983,14 +996,26 @@ inline void tree_shap_recursive_v2(const unsigned num_outputs, const int *childr
         }
         // update contributions to SHAP values for features satisfying the thresholds and not satisfying the thresholds separately
         const unsigned values_offset = node_index * num_outputs;
+        unsigned values_nonzero_ind = 0;
+        unsigned values_nonzero_count = 0;
+        for (unsigned j = 0; j < num_outputs; ++j) {
+            if (values[values_offset + j] != 0) {
+                values_nonzero_ind = j;
+                values_nonzero_count++;
+            }
+        }
         const tfloat scale_zero = -leaf_combination_sum[ptwos_sum] * pweights_residual;
         for (unsigned i = 1; i <= unique_depth; ++i) {
             const PathElement &el = unique_path[i];
             const unsigned phi_offset = el.feature_index * num_outputs;
             const tfloat scale = (el.one_fraction != 0) ? leaf_combination_sum[ptwos_sum - ptwos[i - 1]] * \
             pweights_residual * (1 - el.zero_fraction) : scale_zero;
-            for (unsigned j = 0; j < num_outputs; ++j) {
-                phi[phi_offset + j] += scale * values[values_offset + j];
+            if (values_nonzero_count == 1) {
+                phi[phi_offset + values_nonzero_ind] += scale * values[values_offset + values_nonzero_ind];
+            } else {
+                for (unsigned j = 0; j < num_outputs; ++j) {
+                    phi[phi_offset + j] += scale * values[values_offset + j];
+                }
             }
         }
         leaf_count[0] += 1;
@@ -1788,15 +1813,39 @@ inline void dense_independent(const TreeEnsemble& trees, const ExplanationDatase
  * This runs Tree SHAP with a per tree path conditional dependence assumption.
  */
 inline void dense_tree_path_dependent(const TreeEnsemble& trees, const ExplanationDataset &data,
-                               tfloat *out_contribs, tfloat transform(const tfloat, const tfloat), const int algorithm) {
+                               tfloat *out_contribs, tfloat transform(const tfloat, const tfloat), const int algorithm, const int n_jobs) {
     tfloat *instance_out_contribs;
     TreeEnsemble tree;
     ExplanationDataset instance;
+
+    // pre-define variables for algorithm v2
+    const unsigned max_leaves = (trees.max_nodes + 1) / 2;
+    const unsigned max_combinations = static_cast<int>(round(pow(2, trees.max_depth)));
+    tfloat *combination_sum;
+    int *duplicated_node;
+    // pre-compute values of powers of two
+    int *ptwos = new int[trees.max_depth + 1];
+    ptwos[0] = 1;
+    for (unsigned i = 1; i < trees.max_depth + 1; i++) {
+      ptwos[i] = ptwos[i - 1] * 2;
+    }
+    // array for distributing threads for algorithm v2
+    int *tree_thread = new int[trees.tree_limit];
+    unsigned t = 0;
+    for (unsigned i = 0; i < n_jobs; ++i) {
+        unsigned j = i;
+        while (j < trees.tree_limit) {
+            tree_thread[t] = j;
+            j += n_jobs;
+            t++;
+        }
+    }
 
     // dispatch to the correct algorithm version
     switch (algorithm) {
         case ALGORITHM::v0:
             // build explanation for each sample
+            #pragma omp parallel for private(instance_out_contribs, tree, instance) num_threads(n_jobs)
             for (unsigned i = 0; i < data.num_X; ++i) {
                 instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
                 data.get_x_instance(instance, i);
@@ -1812,6 +1861,7 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
 
         case ALGORITHM::v1:
             // build explanation for each sample
+            #pragma omp parallel for private(instance_out_contribs, tree, instance) num_threads(n_jobs)
             for (unsigned i = 0; i < data.num_X; ++i) {
                 instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
                 data.get_x_instance(instance, i);
@@ -1825,38 +1875,95 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
             }
             return;
 
-        case ALGORITHM::v2:
-            // pre-allocate space for combination sum and duplicated node
-            const unsigned max_leaves = (trees.max_nodes + 1) / 2;
-            const unsigned max_combinations = static_cast<int>(round(pow(2, trees.max_depth)));
-            tfloat *combination_sum = new tfloat[max_leaves * max_combinations];
-            int *duplicated_node = new int[trees.max_nodes];
-
-            // pre-compute values of powers of two
-            int *ptwos = new int[trees.max_depth + 1];
-            ptwos[0] = 1;
-            for (unsigned i = 1; i < trees.max_depth + 1; i++) {
-              ptwos[i] = ptwos[i - 1] * 2;
-            }
+        case ALGORITHM::v2_1:
+            // pre-define variables for parallel computing
+            tfloat *out_contribs_local;
+            tfloat *instance_out_contribs_local;
 
             // compute combination sum for each tree and aggregate the effect of explaining each tree
             // (this works because of the linearity property of Shapley values)
-            for (unsigned j = 0; j < trees.tree_limit; ++j) {
-                trees.get_tree(tree, j);
-                compute_combination_sum_v2(tree, combination_sum, duplicated_node);
+            #pragma omp parallel private(instance_out_contribs, tree, instance, combination_sum, duplicated_node, \
+            out_contribs_local, instance_out_contribs_local) num_threads(n_jobs)
+            {
+                out_contribs_local = new tfloat[data.num_X * (data.M + 1) * trees.num_outputs];
+                for (unsigned i = 0; i < data.num_X; ++i) {
+                    instance_out_contribs_local = out_contribs_local + i * (data.M + 1) * trees.num_outputs;
+                    for (unsigned k = 0; k < (data.M + 1) * trees.num_outputs; ++k) {
+                        instance_out_contribs_local[k] = 0;
+                    }
+                }
+                combination_sum = new tfloat[max_leaves * max_combinations];
+                duplicated_node = new int[trees.max_nodes];
+                
+                #pragma omp for
+                for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                    trees.get_tree(tree, tree_thread[j]);
+                    compute_combination_sum_v2(tree, combination_sum, duplicated_node);
 
-                // build explanation for each sample
+                    // build explanation for each sample
+                    for (unsigned i = 0; i < data.num_X; ++i) {
+                        instance_out_contribs_local = out_contribs_local + i * (data.M + 1) * trees.num_outputs;
+                        data.get_x_instance(instance, i);
+                        tree_shap_v2(tree, combination_sum, duplicated_node, ptwos, instance, instance_out_contribs_local);
+                    }
+                }
+                delete[] combination_sum;
+                delete[] duplicated_node;
+
+                #pragma omp critical
+                for (unsigned i = 0; i < data.num_X; ++i) {
+                    instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
+                    instance_out_contribs_local = out_contribs_local + i * (data.M + 1) * trees.num_outputs;
+                    for (unsigned k = 0; k < (data.M + 1) * trees.num_outputs; ++k) {
+                        instance_out_contribs[k] += instance_out_contribs_local[k];
+                    }
+                }
+                delete[] out_contribs_local;
+            }
+            return;
+
+        case ALGORITHM::v2_2:
+            // pre-allocate space for combination sum and duplicated node
+            combination_sum = new tfloat[max_leaves * max_combinations * trees.tree_limit];
+            duplicated_node = new int[trees.max_nodes * trees.tree_limit];
+
+            // pre-define variables for parallel computing
+            tfloat *combination_sum_local;
+            int *duplicated_node_local;
+
+            // compute combination sum for each tree
+            #pragma omp parallel private(tree, combination_sum_local, duplicated_node_local) num_threads(n_jobs)
+            {
+                #pragma omp for
+                for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                    combination_sum_local = combination_sum + tree_thread[j] * max_leaves * max_combinations;
+                    duplicated_node_local = duplicated_node + tree_thread[j] * trees.max_nodes;
+                    trees.get_tree(tree, tree_thread[j]);
+                    compute_combination_sum_v2(tree, combination_sum_local, duplicated_node_local);
+                }
+            }
+
+            // aggregate the effect of explaining each tree
+            // (this works because of the linearity property of Shapley values)
+            #pragma omp parallel private(instance_out_contribs, tree, instance, combination_sum_local, duplicated_node_local) num_threads(n_jobs)
+            {
+                #pragma omp for
                 for (unsigned i = 0; i < data.num_X; ++i) {
                     instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
                     data.get_x_instance(instance, i);
-                    tree_shap_v2(tree, combination_sum, duplicated_node, ptwos, instance, instance_out_contribs);
+                    for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                        combination_sum_local = combination_sum + j * max_leaves * max_combinations;
+                        duplicated_node_local = duplicated_node + j * trees.max_nodes;
+                        trees.get_tree(tree, j);
+                        tree_shap_v2(tree, combination_sum_local, duplicated_node_local, ptwos, instance, instance_out_contribs);
+                    }
                 }
             }
             delete[] combination_sum;
             delete[] duplicated_node;
-            delete[] ptwos;
             return;
     }
+    delete[] ptwos;
 
     // apply the base offset to the bias term
     for (unsigned i = 0; i < data.num_X; ++i) {
@@ -1885,7 +1992,7 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
 
 inline void dense_tree_interactions_path_dependent(const TreeEnsemble& trees, const ExplanationDataset &data,
                                             tfloat *out_contribs,
-                                            tfloat transform(const tfloat, const tfloat), const int algorithm) {
+                                            tfloat transform(const tfloat, const tfloat), const int algorithm, const int n_jobs) {
 
     // build a list of all the unique features in each tree
     int amount_of_unique_features = min(data.M, trees.max_nodes);
@@ -1910,116 +2017,139 @@ inline void dense_tree_interactions_path_dependent(const TreeEnsemble& trees, co
     TreeEnsemble tree;
     ExplanationDataset instance;
     const unsigned contrib_row_size = (data.M + 1) * trees.num_outputs;
-    tfloat *diag_contribs = new tfloat[contrib_row_size];
-    tfloat *on_contribs = new tfloat[contrib_row_size];
-    tfloat *off_contribs = new tfloat[contrib_row_size];
+    tfloat *diag_contribs;
+    tfloat *on_contribs;
+    tfloat *off_contribs;
 
     // dispatch to the correct algorithm version
     switch (algorithm) {
         case ALGORITHM::v0:
-            for (unsigned i = 0; i < data.num_X; ++i) {
-                instance_out_contribs = out_contribs + i * (data.M + 1) * contrib_row_size;
-                data.get_x_instance(instance, i);
+            #pragma omp parallel private(instance_out_contribs, tree, instance, diag_contribs, on_contribs, off_contribs) num_threads(n_jobs)
+            {
+                diag_contribs = new tfloat[contrib_row_size];
+                on_contribs = new tfloat[contrib_row_size];
+                off_contribs = new tfloat[contrib_row_size];
 
-                // aggregate the effect of explaining each tree
-                // (this works because of the linearity property of Shapley values)
-                std::fill(diag_contribs, diag_contribs + contrib_row_size, 0);
-                for (unsigned j = 0; j < trees.tree_limit; ++j) {
-                    trees.get_tree(tree, j);
-                    tree_shap(tree, instance, diag_contribs, 0, 0);
+                #pragma omp for
+                for (unsigned i = 0; i < data.num_X; ++i) {
+                    instance_out_contribs = out_contribs + i * (data.M + 1) * contrib_row_size;
+                    data.get_x_instance(instance, i);
 
-                    const int *unique_features_row = unique_features + j * amount_of_unique_features;
-                    for (unsigned k = 0; k < amount_of_unique_features; ++k) {
-                        const int ind = unique_features_row[k];
-                        if (ind < 0) break; // < 0 means we have seen all the features for this tree
+                    // aggregate the effect of explaining each tree
+                    // (this works because of the linearity property of Shapley values)
+                    std::fill(diag_contribs, diag_contribs + contrib_row_size, 0);
+                    for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                        trees.get_tree(tree, j);
+                        tree_shap(tree, instance, diag_contribs, 0, 0);
 
-                        // compute the shap value with this feature held on and off
-                        std::fill(on_contribs, on_contribs + contrib_row_size, 0);
-                        std::fill(off_contribs, off_contribs + contrib_row_size, 0);
-                        tree_shap(tree, instance, on_contribs, 1, ind);
-                        tree_shap(tree, instance, off_contribs, -1, ind);
+                        const int *unique_features_row = unique_features + j * amount_of_unique_features;
+                        for (unsigned k = 0; k < amount_of_unique_features; ++k) {
+                            const int ind = unique_features_row[k];
+                            if (ind < 0) break; // < 0 means we have seen all the features for this tree
 
-                        // save the difference between on and off as the interaction value
-                        for (unsigned l = 0; l < contrib_row_size; ++l) {
-                            const tfloat val = (on_contribs[l] - off_contribs[l]) / 2;
-                            instance_out_contribs[ind * contrib_row_size + l] += val;
-                            diag_contribs[l] -= val;
+                            // compute the shap value with this feature held on and off
+                            std::fill(on_contribs, on_contribs + contrib_row_size, 0);
+                            std::fill(off_contribs, off_contribs + contrib_row_size, 0);
+                            tree_shap(tree, instance, on_contribs, 1, ind);
+                            tree_shap(tree, instance, off_contribs, -1, ind);
+
+                            // save the difference between on and off as the interaction value
+                            for (unsigned l = 0; l < contrib_row_size; ++l) {
+                                const tfloat val = (on_contribs[l] - off_contribs[l]) / 2;
+                                instance_out_contribs[ind * contrib_row_size + l] += val;
+                                diag_contribs[l] -= val;
+                            }
                         }
                     }
-                }
 
-                // set the diagonal
-                for (unsigned j = 0; j < data.M + 1; ++j) {
-                    const unsigned offset = j * contrib_row_size + j * trees.num_outputs;
-                    for (unsigned k = 0; k < trees.num_outputs; ++k) {
-                        instance_out_contribs[offset + k] = diag_contribs[j * trees.num_outputs + k];
+                    // set the diagonal
+                    for (unsigned j = 0; j < data.M + 1; ++j) {
+                        const unsigned offset = j * contrib_row_size + j * trees.num_outputs;
+                        for (unsigned k = 0; k < trees.num_outputs; ++k) {
+                            instance_out_contribs[offset + k] = diag_contribs[j * trees.num_outputs + k];
+                        }
+                    }
+
+                    // apply the base offset to the bias term
+                    const unsigned last_ind = (data.M * (data.M + 1) + data.M) * trees.num_outputs;
+                    for (unsigned j = 0; j < trees.num_outputs; ++j) {
+                        instance_out_contribs[last_ind + j] += trees.base_offset[j];
                     }
                 }
-
-                // apply the base offset to the bias term
-                const unsigned last_ind = (data.M * (data.M + 1) + data.M) * trees.num_outputs;
-                for (unsigned j = 0; j < trees.num_outputs; ++j) {
-                    instance_out_contribs[last_ind + j] += trees.base_offset[j];
-                }
+                delete[] diag_contribs;
+                delete[] on_contribs;
+                delete[] off_contribs;
             }
             return;
 
         case ALGORITHM::v1:
-            for (unsigned i = 0; i < data.num_X; ++i) {
-                instance_out_contribs = out_contribs + i * (data.M + 1) * contrib_row_size;
-                data.get_x_instance(instance, i);
+            #pragma omp parallel private(instance_out_contribs, tree, instance, diag_contribs, on_contribs, off_contribs) num_threads(n_jobs)
+            {
+                diag_contribs = new tfloat[contrib_row_size];
+                on_contribs = new tfloat[contrib_row_size];
+                off_contribs = new tfloat[contrib_row_size];
 
-                // aggregate the effect of explaining each tree
-                // (this works because of the linearity property of Shapley values)
-                std::fill(diag_contribs, diag_contribs + contrib_row_size, 0);
-                for (unsigned j = 0; j < trees.tree_limit; ++j) {
-                    trees.get_tree(tree, j);
-                    tree_shap_v1(tree, instance, diag_contribs, 0, 0);
+                #pragma omp for
+                for (unsigned i = 0; i < data.num_X; ++i) {
+                    instance_out_contribs = out_contribs + i * (data.M + 1) * contrib_row_size;
+                    data.get_x_instance(instance, i);
 
-                    const int *unique_features_row = unique_features + j * amount_of_unique_features;
-                    for (unsigned k = 0; k < amount_of_unique_features; ++k) {
-                        const int ind = unique_features_row[k];
-                        if (ind < 0) break; // < 0 means we have seen all the features for this tree
+                    // aggregate the effect of explaining each tree
+                    // (this works because of the linearity property of Shapley values)
+                    std::fill(diag_contribs, diag_contribs + contrib_row_size, 0);
+                    for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                        trees.get_tree(tree, j);
+                        tree_shap_v1(tree, instance, diag_contribs, 0, 0);
 
-                        // compute the shap value with this feature held on and off
-                        std::fill(on_contribs, on_contribs + contrib_row_size, 0);
-                        std::fill(off_contribs, off_contribs + contrib_row_size, 0);
-                        tree_shap_v1(tree, instance, on_contribs, 1, ind);
-                        tree_shap_v1(tree, instance, off_contribs, -1, ind);
+                        const int *unique_features_row = unique_features + j * amount_of_unique_features;
+                        for (unsigned k = 0; k < amount_of_unique_features; ++k) {
+                            const int ind = unique_features_row[k];
+                            if (ind < 0) break; // < 0 means we have seen all the features for this tree
 
-                        // save the difference between on and off as the interaction value
-                        for (unsigned l = 0; l < contrib_row_size; ++l) {
-                            const tfloat val = (on_contribs[l] - off_contribs[l]) / 2;
-                            instance_out_contribs[ind * contrib_row_size + l] += val;
-                            diag_contribs[l] -= val;
+                            // compute the shap value with this feature held on and off
+                            std::fill(on_contribs, on_contribs + contrib_row_size, 0);
+                            std::fill(off_contribs, off_contribs + contrib_row_size, 0);
+                            tree_shap_v1(tree, instance, on_contribs, 1, ind);
+                            tree_shap_v1(tree, instance, off_contribs, -1, ind);
+
+                            // save the difference between on and off as the interaction value
+                            for (unsigned l = 0; l < contrib_row_size; ++l) {
+                                const tfloat val = (on_contribs[l] - off_contribs[l]) / 2;
+                                instance_out_contribs[ind * contrib_row_size + l] += val;
+                                diag_contribs[l] -= val;
+                            }
                         }
                     }
-                }
 
-                // set the diagonal
-                for (unsigned j = 0; j < data.M + 1; ++j) {
-                    const unsigned offset = j * contrib_row_size + j * trees.num_outputs;
-                    for (unsigned k = 0; k < trees.num_outputs; ++k) {
-                        instance_out_contribs[offset + k] = diag_contribs[j * trees.num_outputs + k];
+                    // set the diagonal
+                    for (unsigned j = 0; j < data.M + 1; ++j) {
+                        const unsigned offset = j * contrib_row_size + j * trees.num_outputs;
+                        for (unsigned k = 0; k < trees.num_outputs; ++k) {
+                            instance_out_contribs[offset + k] = diag_contribs[j * trees.num_outputs + k];
+                        }
+                    }
+
+                    // apply the base offset to the bias term
+                    const unsigned last_ind = (data.M * (data.M + 1) + data.M) * trees.num_outputs;
+                    for (unsigned j = 0; j < trees.num_outputs; ++j) {
+                        instance_out_contribs[last_ind + j] += trees.base_offset[j];
                     }
                 }
-
-                // apply the base offset to the bias term
-                const unsigned last_ind = (data.M * (data.M + 1) + data.M) * trees.num_outputs;
-                for (unsigned j = 0; j < trees.num_outputs; ++j) {
-                    instance_out_contribs[last_ind + j] += trees.base_offset[j];
-                }
+                delete[] diag_contribs;
+                delete[] on_contribs;
+                delete[] off_contribs;
             }
             return;
 
-        case ALGORITHM::v2:
+        case ALGORITHM::v2_1:
+            std::cerr << "ALGORITHM::v2 does not support interactions!\n";
+            return;
+
+        case ALGORITHM::v2_2:
             std::cerr << "ALGORITHM::v2 does not support interactions!\n";
             return;
     }
 
-    delete[] diag_contribs;
-    delete[] on_contribs;
-    delete[] off_contribs;
     delete[] unique_features;
 }
 
@@ -2068,7 +2198,7 @@ inline void dense_global_path_dependent(const TreeEnsemble& trees, const Explana
  * The main method for computing Tree SHAP on models using dense data.
  */
 inline void dense_tree_shap(const TreeEnsemble& trees, const ExplanationDataset &data, tfloat *out_contribs,
-                     const int feature_dependence, unsigned model_transform, const int algorithm, bool interactions) {
+                     const int feature_dependence, unsigned model_transform, const int algorithm, const int n_jobs, bool interactions) {
 
     // see what transform (if any) we have
     transform_f transform = get_transform(model_transform);
@@ -2082,8 +2212,8 @@ inline void dense_tree_shap(const TreeEnsemble& trees, const ExplanationDataset 
             return;
         
         case FEATURE_DEPENDENCE::tree_path_dependent:
-            if (interactions) dense_tree_interactions_path_dependent(trees, data, out_contribs, transform, algorithm);
-            else dense_tree_path_dependent(trees, data, out_contribs, transform, algorithm);
+            if (interactions) dense_tree_interactions_path_dependent(trees, data, out_contribs, transform, algorithm, n_jobs);
+            else dense_tree_path_dependent(trees, data, out_contribs, transform, algorithm, n_jobs);
             return;
 
         case FEATURE_DEPENDENCE::global_path_dependent:

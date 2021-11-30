@@ -47,7 +47,9 @@ algorithm_codes = {
     "v0": 0,
     "v1": 1,
     "v2": 2,
-    "auto": 3
+    "v2_1": 3,
+    "v2_2": 4,
+    "auto": 5
 }
 
 class Tree(Explainer):
@@ -58,7 +60,7 @@ class Tree(Explainer):
     implementations either inside an externel model package or in the local compiled C extention.
     """
 
-    def __init__(self, model, data = None, model_output="raw", feature_perturbation="interventional", algorithm="v0", feature_names=None, approximate=False, shortcut=True, **deprecated_options):
+    def __init__(self, model, data = None, model_output="raw", feature_perturbation="interventional", algorithm="auto", n_jobs=-1, feature_names=None, approximate=False, shortcut=False, **deprecated_options):
         """ Build a new Tree explainer for the passed model.
 
         Parameters
@@ -92,6 +94,10 @@ class Tree(Explainer):
             "v1" over "v0", and we prefer "v2" over "v1" when the number of samples to be explained is sufficiently 
             large, and the memory constraint is also satisfied.
 
+        n_jobs : -1 (default), or a positive integer
+            Number of parallel threads used to run Fast TreeSHAP. The default value of n_jobs is -1, which utilizes
+            all available cores in parallel computing.
+
         model_output : "raw", "probability", "log_loss", or model method name
             What output of the model should be explained. If "raw" then we explain the raw output of the
             trees, which varies by model. For regression models "raw" is the standard output, for binary
@@ -104,10 +110,12 @@ class Tree(Explainer):
             log loss of the model for each sample. This is helpful for breaking down model performance by feature.
             Currently the probability and logloss options are only supported when feature_dependence="independent".
 
-        shortcut: True (default) or False
-            Whether to use the C++ version of TreeSHAP embedded in XGBoost, LightGBM, and CatBoost packages directly
-            when computing SHAP values for XGBoost, LightGBM, and CatBoost models and when computing SHAP interaction
-            values for XGBoost models.
+        shortcut: False (default) or True
+            Whether to use the C++ version of TreeSHAP embedded in XGBoost, LightGBM and CatBoost packages directly
+            when computing SHAP values for XGBoost, LightGBM and CatBoost models, and when computing SHAP interaction
+            values for XGBoost models. Current version of FastTreeSHAP package supports XGBoost and LightGBM models,
+            and its support to CatBoost model is working in progress (shortcut is automatically set to be True for
+            CatBoost model).
 
         Examples
         --------
@@ -167,11 +175,16 @@ class Tree(Explainer):
         self.data_missing = None if self.data is None else pd.isna(self.data)
         self.feature_perturbation = feature_perturbation
         self.algorithm = algorithm
+        if n_jobs < 0:
+            self.n_jobs = os.cpu_count()
+        elif n_jobs < 1:
+            self.n_jobs = 1
+        else:
+            self.n_jobs = min(int(n_jobs), os.cpu_count())
         self.expected_value = None
         self.model = TreeEnsemble(model, self.data, self.data_missing, model_output)
         self.model_output = model_output
         #self.model_output = self.model.model_output # this allows the TreeEnsemble to translate model outputs types by how it loads the model
-        
         self.approximate = approximate
         self.shortcut = shortcut
 
@@ -350,25 +363,32 @@ class Tree(Explainer):
             num_samples_threshold = 2**(self.model.max_depth + 1) / self.model.max_depth
             num_samples_check = (num_samples >= num_samples_threshold)
             # check if memory constraint is satisfied
-            memory_check = self._memory_check()
-            if num_samples_check and memory_check:
-                algorithm = "v2"
+            memory_check_1, memory_check_2 = self._memory_check(X)
+            if num_samples_check and (memory_check_1 or memory_check_2):
+                if memory_check_1:
+                    algorithm = "v2_1"
+                else:
+                    algorithm = "v2_2"
             else:
                 algorithm = "v1"
         else:
             algorithm = self.algorithm
             if algorithm == "v2":
                 # check if memory constraint is satisfied
-                memory_check = self._memory_check()
-                if not memory_check:
+                memory_check_1, memory_check_2 = self._memory_check(X)
+                if memory_check_1:
+                    algorithm = "v2_1"
+                elif memory_check_2:
+                    algorithm = "v2_2"
+                else:
                     warnings.warn("There may exist memory issue for algorithm v2. Switched to algorithm v1.")
                     algorithm = "v1"
 
         # shortcut using the C++ version of Tree SHAP in XGBoost, LightGBM, and CatBoost
-        if self.feature_perturbation == "tree_path_dependent" and self.model.model_type != "internal" and self.data is None and self.shortcut:
+        if self.feature_perturbation == "tree_path_dependent" and self.model.model_type != "internal" and self.data is None:
             model_output_vals = None
             phi = None
-            if self.model.model_type == "xgboost":
+            if self.model.model_type == "xgboost" and self.shortcut:
                 import xgboost
                 if not isinstance(X, xgboost.core.DMatrix):
                     X = xgboost.DMatrix(X)
@@ -389,7 +409,7 @@ class Tree(Explainer):
                         validate_features=False
                     )
 
-            elif self.model.model_type == "lightgbm":
+            elif self.model.model_type == "lightgbm" and self.shortcut:
                 assert not approximate, "approximate=True is not supported for LightGBM models!"
                 phi = self.model.original_model.predict(X, num_iteration=tree_limit, pred_contrib=True)
                 # Note: the data must be joined on the last axis
@@ -440,7 +460,7 @@ class Tree(Explainer):
                 self.model.features, self.model.thresholds, self.model.values, self.model.node_sample_weight,
                 self.model.max_depth, X, X_missing, y, self.data, self.data_missing, tree_limit,
                 self.model.base_offset, phi, feature_perturbation_codes[self.feature_perturbation],
-                output_transform_codes[transform], algorithm_codes[algorithm], False
+                output_transform_codes[transform], algorithm_codes[algorithm], self.n_jobs, False
             )
         else:
             _cext.dense_tree_saabas(
@@ -458,17 +478,18 @@ class Tree(Explainer):
 
 
     # check if memory constraint is satisfied
-    def _memory_check(self):
+    def _memory_check(self, X):
+        max_leaves = (max(self.model.num_nodes) + 1) / 2
+        max_combinations = 2**self.model.max_depth
+        phi_dim = X.shape[0] * (X.shape[1] + 1) * self.model.num_outputs
+        memory_usage_1 = (max_leaves * max_combinations + phi_dim) * 8 * self.n_jobs
+        memory_usage_2 = max_leaves * max_combinations * self.model.values.shape[0] * 8
         try:
-            max_leaves = (max(self.model.num_nodes) + 1) / 2
-            max_combinations = 2**self.model.max_depth
-            memory_usage = max_leaves * max_combinations * 8
             import psutil
             memory_tolerance = 0.25 * psutil.virtual_memory().total
-            memory_check = (memory_usage <= memory_tolerance)
         except:
-            memory_check = (self.model.max_depth <= 16)
-        return memory_check
+            memory_tolerance = 4294967296  # 4GB
+        return memory_usage_1 <= memory_tolerance, memory_usage_2 <= memory_tolerance
 
 
     # we pull off the last column and keep it as our expected_value
@@ -566,7 +587,7 @@ class Tree(Explainer):
             self.model.features, self.model.thresholds, self.model.values, self.model.node_sample_weight,
             self.model.max_depth, X, X_missing, y, self.data, self.data_missing, tree_limit,
             self.model.base_offset, phi, feature_perturbation_codes[self.feature_perturbation],
-            output_transform_codes[transform], algorithm_codes[algorithm], True
+            output_transform_codes[transform], algorithm_codes[algorithm], self.n_jobs, True
         )
 
         return self._get_shap_interactions_output(phi,flat_output)
@@ -901,7 +922,6 @@ class TreeEnsemble:
             self.base_offset = xgb_loader.base_score
             self.objective = objective_name_map.get(xgb_loader.name_obj, None)
             self.tree_output = tree_output_name_map.get(xgb_loader.name_obj, None)
-            self.tree_limit = getattr(model, "best_ntree_limit", None)
             if xgb_loader.num_class > 0:
                 self.num_stacked_models = xgb_loader.num_class
             if self.model_output == "predict_proba":
@@ -918,7 +938,6 @@ class TreeEnsemble:
             self.base_offset = xgb_loader.base_score
             self.objective = objective_name_map.get(xgb_loader.name_obj, None)
             self.tree_output = tree_output_name_map.get(xgb_loader.name_obj, None)
-            self.tree_limit = getattr(model, "best_ntree_limit", None)
             if xgb_loader.num_class > 0:
                 self.num_stacked_models = xgb_loader.num_class
         elif safe_isinstance(model, "xgboost.sklearn.XGBRanker"):
@@ -930,7 +949,6 @@ class TreeEnsemble:
             self.base_offset = xgb_loader.base_score
             # Note: for ranker, leaving tree_output and objective as None as they
             # are not implemented in native code yet
-            self.tree_limit = getattr(model, "best_ntree_limit", None)
             if xgb_loader.num_class > 0:
                 self.num_stacked_models = xgb_loader.num_class
         elif safe_isinstance(model, "lightgbm.basic.Booster"):
@@ -1281,13 +1299,13 @@ class SingleTree:
         elif type(tree) == dict and 'tree_structure' in tree: # LightGBM model dump
             start = tree['tree_structure']
             num_parents = tree['num_leaves']-1
-            self.children_left = np.empty((2*num_parents+1), dtype=np.int32)
-            self.children_right = np.empty((2*num_parents+1), dtype=np.int32)
-            self.children_default = np.empty((2*num_parents+1), dtype=np.int32)
-            self.features = np.empty((2*num_parents+1), dtype=np.int32)
-            self.thresholds = np.empty((2*num_parents+1), dtype=np.float64)
-            self.values = [-2]*(2*num_parents+1)
-            self.node_sample_weight = np.empty((2*num_parents+1), dtype=np.float64)
+            self.children_left = -np.ones((2*num_parents+1), dtype=np.int32)
+            self.children_right = -np.ones((2*num_parents+1), dtype=np.int32)
+            self.children_default = -np.ones((2*num_parents+1), dtype=np.int32)
+            self.features = -np.ones((2*num_parents+1), dtype=np.int32)
+            self.thresholds = np.zeros((2*num_parents+1), dtype=np.float64)
+            self.values = [0]*(2*num_parents+1)
+            self.node_sample_weight = np.ones((2*num_parents+1), dtype=np.float64)
             visited, queue = [], [start]
             while queue:
                 vertex = queue.pop(0)
@@ -1313,6 +1331,8 @@ class SingleTree:
                         queue.append(vertex['left_child'])
                         queue.append(vertex['right_child'])
                 else:
+                    if 'leaf_index' not in vertex.keys():
+                        break
                     self.children_left[vertex['leaf_index']+num_parents] = -1
                     self.children_right[vertex['leaf_index']+num_parents] = -1
                     self.children_default[vertex['leaf_index']+num_parents] = -1
@@ -1326,6 +1346,8 @@ class SingleTree:
                     self.node_sample_weight[vertex['leaf_index']+num_parents] = vertex['leaf_count']
             self.values = np.asarray(self.values)
             self.values = np.multiply(self.values, scaling)
+            if len(self.values.shape) == 1:
+                self.values = self.values[..., np.newaxis]
 
         elif type(tree) == dict and 'nodeid' in tree:
             """ Directly create tree given the JSON dump (with stats) of a XGBoost model.
