@@ -58,7 +58,7 @@ The following screenshot shows a typical use case of FastTreeSHAP on [Census Inc
 * `"v0"`: Original TreeSHAP algorithm in [SHAP](https://github.com/slundberg/shap) package.
 * `"v1"`: FastTreeSHAP v1 algorithm proposed in [FastTreeSHAP](https://arxiv.org/abs/2109.09847) paper.
 * `"v2"`: FastTreeSHAP v2 algorithm proposed in [FastTreeSHAP](https://arxiv.org/abs/2109.09847) paper.
-* `"auto"` (default): Automatic selection between `"v0"`, `"v1"` and `"v2"` according to the number of samples to be explained and the constraint on the allocated memory. Specifically, `"v1"` is always perferred to `"v0"` in any use cases, and `"v2"` is perferred to `"v1"` when the number of samples to be explained is sufficiently large (<img src="https://latex.codecogs.com/svg.latex?M>2^{D+1}/D"/>), and the memory constraint is also satisfied (<img src="https://latex.codecogs.com/svg.latex?min\{(MN+L2^D)\cdot C,\;TL2^D\}\cdot8Byte<0.25\cdot Total\,Memory"/>, <img src="https://latex.codecogs.com/svg.latex?C"/> is the number of threads). More detailed discussion of the above criteria can be found in [FastTreeSHAP](https://arxiv.org/abs/2109.09847) paper and in Section [Notes](#notes).
+* `"auto"` (default): Automatic selection between `"v0"`, `"v1"` and `"v2"` according to the number of samples to be explained and the constraint on the allocated memory. Specifically, `"v1"` is always preferred to `"v0"` in any use cases, and `"v2"` is preferred to `"v1"` when the number of samples to be explained is sufficiently large (<img src="https://latex.codecogs.com/svg.latex?M>2^{D+1}/D"/>), and the memory constraint is also satisfied (<img src="https://latex.codecogs.com/svg.latex?min\{(MN+L2^D)\cdot C,\;TL2^D\}\cdot8Byte<0.25\cdot Total\,Memory"/>, <img src="https://latex.codecogs.com/svg.latex?C"/> is the number of threads). More detailed discussion of the above criteria can be found in [FastTreeSHAP](https://arxiv.org/abs/2109.09847) paper and in Section [Notes](#notes).
 
 `n_jobs`: This argument specifies the number of parallel threads used to run FastTreeSHAP. It can take values `-1` or a positive integer. Its default value is `-1`, which means utilizing all available cores in parallel computing.
 
@@ -77,7 +77,7 @@ The code in the following screenshot was run on all available cores in a Macbook
 
 ## Notebooks
 
-The notebooks below contain more detailed comparisons between FastTreeSHAP v1, FastTreeSHAP v2 and the original TreeSHAP in classfication and regression problems using [scikit-learn](https://scikit-learn.org), [XGBoost](https://github.com/dmlc/xgboost) and [LightGBM](https://github.com/microsoft/LightGBM):
+The notebooks below contain more detailed comparisons between FastTreeSHAP v1, FastTreeSHAP v2 and the original TreeSHAP in classification and regression problems using [scikit-learn](https://scikit-learn.org), [XGBoost](https://github.com/dmlc/xgboost) and [LightGBM](https://github.com/microsoft/LightGBM):
 * [Census Income (Binary Classification)](notebooks/FastTreeSHAP_Census_Income.ipynb)
 * [Superconductor (Regression)](notebooks/FastTreeSHAP_Superconductor.ipynb)
 * [Crop Mapping (Multiclass Classification)](notebooks/FastTreeSHAP_Crop_Mapping.ipynb)

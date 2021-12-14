@@ -96,7 +96,8 @@ class Tree(Explainer):
 
         n_jobs : -1 (default), or a positive integer
             Number of parallel threads used to run Fast TreeSHAP. The default value of n_jobs is -1, which utilizes
-            all available cores in parallel computing.
+            all available cores in parallel computing (Setting OMP_NUM_THREADS is unnecessary since n_jobs will
+            overwrite this parameter).
 
         model_output : "raw", "probability", "log_loss", or model method name
             What output of the model should be explained. If "raw" then we explain the raw output of the
@@ -362,7 +363,7 @@ class Tree(Explainer):
             num_samples = X.shape[0]
             num_samples_threshold = 2**(self.model.max_depth + 1) / self.model.max_depth
             num_samples_check = (num_samples >= num_samples_threshold)
-            # check if memory constraint is satisfied
+            # check if memory constraint is satisfied (check Section Notes in README.md for justifications of memory check conditions in function _memory_check)
             memory_check_1, memory_check_2 = self._memory_check(X)
             if num_samples_check and (memory_check_1 or memory_check_2):
                 if memory_check_1:
@@ -374,7 +375,7 @@ class Tree(Explainer):
         else:
             algorithm = self.algorithm
             if algorithm == "v2":
-                # check if memory constraint is satisfied
+                # check if memory constraint is satisfied (check Section Notes in README.md for justifications of memory check conditions in function _memory_check)
                 memory_check_1, memory_check_2 = self._memory_check(X)
                 if memory_check_1:
                     algorithm = "v2_1"
@@ -477,7 +478,7 @@ class Tree(Explainer):
         return out
 
 
-    # check if memory constraint is satisfied
+    # check if memory constraint is satisfied (check Section Notes in README.md for justifications of memory check conditions in this function)
     def _memory_check(self, X):
         max_leaves = (max(self.model.num_nodes) + 1) / 2
         max_combinations = 2**self.model.max_depth
@@ -1304,8 +1305,8 @@ class SingleTree:
             self.children_default = -np.ones((2*num_parents+1), dtype=np.int32)
             self.features = -np.ones((2*num_parents+1), dtype=np.int32)
             self.thresholds = np.zeros((2*num_parents+1), dtype=np.float64)
-            self.values = [0]*(2*num_parents+1)
-            self.node_sample_weight = np.ones((2*num_parents+1), dtype=np.float64)
+            self.values = [0]*(2*num_parents+1)  # fix a bug for empty trees
+            self.node_sample_weight = np.ones((2*num_parents+1), dtype=np.float64)  # fix a bug for empty trees
             visited, queue = [], [start]
             while queue:
                 vertex = queue.pop(0)

@@ -13,39 +13,13 @@ import shap
 import fasttreeshap
 
 
-def test_fasttreeshap_xgboost():
-    xgboost = pytest.importorskip('xgboost')
+def test_fasttreeshap_sklearn_regression():
 
-    # train XGBoost model
-    X, y = fasttreeshap.datasets.boston()
-    model = xgboost.train({"learning_rate": 0.01, "silent": 1}, xgboost.DMatrix(X, label=y), 100)
-
-    # compute SHAP values using FastTreeSHAP v0 (i.e., original TreeSHAP)
-    explainer_v0 = fasttreeshap.TreeExplainer(model, algorithm = "v0", shortcut = False)
-    shap_values_v0 = explainer_v0(X).values
-
-    # compute SHAP values using FastTreeSHAP v1
-    explainer_v1 = fasttreeshap.TreeExplainer(model, algorithm = "v1", shortcut = False)
-    shap_values_v1 = explainer_v1(X).values
-
-    # compute SHAP values using FastTreeSHAP v2
-    explainer_v2 = fasttreeshap.TreeExplainer(model, algorithm = "v2", shortcut = False)
-    shap_values_v2 = explainer_v2(X).values
-
-    # justify the correctness of FastTreeSHAP v1 in SHAP value computation
-    assert np.allclose(shap_values_v0, shap_values_v1)
-
-    # justify the correctness of FastTreeSHAP v2 in SHAP value computation
-    assert np.allclose(shap_values_v0, shap_values_v2)
-
-
-def test_fasttreeshap_sklearn():
-
-    # train model
+    # train sklearn models
     X, y = fasttreeshap.datasets.boston()
     models = [
-        sklearn.ensemble.RandomForestRegressor(n_estimators=10),
-        sklearn.ensemble.ExtraTreesRegressor(n_estimators=10),
+        sklearn.ensemble.RandomForestRegressor(n_estimators = 100, max_depth = 6),
+        sklearn.ensemble.ExtraTreesRegressor(n_estimators = 100, max_depth = 6),
     ]
     for model in models:
         model.fit(X, y)
@@ -69,32 +43,67 @@ def test_fasttreeshap_sklearn():
         assert np.allclose(shap_values_v0, shap_values_v2)
 
 
-def test_fasttreeshap_xgboost_interaction():
+def test_fasttreeshap_xgboost_regression():
     xgboost = pytest.importorskip('xgboost')
 
     # train XGBoost model
     X, y = fasttreeshap.datasets.boston()
-    model = xgboost.train({"learning_rate": 0.01, "silent": 1}, xgboost.DMatrix(X, label=y), 100)
+    model = xgboost.XGBRegressor(n_estimators = 100, max_depth = 6, learning_rate = 0.1)
+    model.fit(X, y)
 
-    # compute SHAP interaction values using FastTreeSHAP v0 (i.e., original TreeSHAP)
+    # compute SHAP values using FastTreeSHAP v0 (i.e., original TreeSHAP)
     explainer_v0 = fasttreeshap.TreeExplainer(model, algorithm = "v0", shortcut = False)
-    shap_interaction_values_v0 = explainer_v0(X, interactions = True).values
+    shap_values_v0 = explainer_v0(X).values
 
-    # compute SHAP interaction values using FastTreeSHAP v1
+    # compute SHAP values using FastTreeSHAP v1
     explainer_v1 = fasttreeshap.TreeExplainer(model, algorithm = "v1", shortcut = False)
-    shap_interaction_values_v1 = explainer_v1(X, interactions = True).values
+    shap_values_v1 = explainer_v1(X).values
 
-    # justify the correctness of FastTreeSHAP v1 in SHAP interaction value computation
-    assert np.allclose(shap_interaction_values_v0, shap_interaction_values_v1)
+    # compute SHAP values using FastTreeSHAP v2
+    explainer_v2 = fasttreeshap.TreeExplainer(model, algorithm = "v2", shortcut = False)
+    shap_values_v2 = explainer_v2(X).values
+
+    # justify the correctness of FastTreeSHAP v1 in SHAP value computation
+    assert np.allclose(shap_values_v0, shap_values_v1)
+
+    # justify the correctness of FastTreeSHAP v2 in SHAP value computation
+    assert np.allclose(shap_values_v0, shap_values_v2)
 
 
-def test_fasttreeshap_sklearn_interaction():
+def test_fasttreeshap_lightgbm_regression():
+    lightgbm = pytest.importorskip('lightgbm')
 
-    # train model
+    # train LightGBM model
+    X, y = fasttreeshap.datasets.boston()
+    model = lightgbm.LGBMRegressor(n_estimators = 100, max_depth = 6, learning_rate = 0.1)
+    model.fit(X, y)
+
+    # compute SHAP values using FastTreeSHAP v0 (i.e., original TreeSHAP)
+    explainer_v0 = fasttreeshap.TreeExplainer(model, algorithm = "v0", shortcut = False)
+    shap_values_v0 = explainer_v0(X).values
+
+    # compute SHAP values using FastTreeSHAP v1
+    explainer_v1 = fasttreeshap.TreeExplainer(model, algorithm = "v1", shortcut = False)
+    shap_values_v1 = explainer_v1(X).values
+
+    # compute SHAP values using FastTreeSHAP v2
+    explainer_v2 = fasttreeshap.TreeExplainer(model, algorithm = "v2", shortcut = False)
+    shap_values_v2 = explainer_v2(X).values
+
+    # justify the correctness of FastTreeSHAP v1 in SHAP value computation
+    assert np.allclose(shap_values_v0, shap_values_v1)
+
+    # justify the correctness of FastTreeSHAP v2 in SHAP value computation
+    assert np.allclose(shap_values_v0, shap_values_v2)
+
+
+def test_fasttreeshap_sklearn_interaction_regression():
+
+    # train sklearn models
     X, y = fasttreeshap.datasets.boston()
     models = [
-        sklearn.ensemble.RandomForestRegressor(n_estimators=10, max_depth=6),
-        sklearn.ensemble.ExtraTreesRegressor(n_estimators=10, max_depth=6),
+        sklearn.ensemble.RandomForestRegressor(n_estimators = 100, max_depth = 6),
+        sklearn.ensemble.ExtraTreesRegressor(n_estimators = 100, max_depth = 6),
     ]
     for model in models:
         model.fit(X, y)
@@ -109,6 +118,193 @@ def test_fasttreeshap_sklearn_interaction():
 
         # justify the correctness of FastTreeSHAP v1 in SHAP interaction value computation
         assert np.allclose(shap_interaction_values_v0, shap_interaction_values_v1)
+
+
+def test_fasttreeshap_xgboost_interaction_regression():
+    xgboost = pytest.importorskip('xgboost')
+
+    # train XGBoost model
+    X, y = fasttreeshap.datasets.boston()
+    model = xgboost.XGBRegressor(n_estimators = 100, max_depth = 6, learning_rate = 0.1)
+    model.fit(X, y)
+
+    # compute SHAP interaction values using FastTreeSHAP v0 (i.e., original TreeSHAP)
+    explainer_v0 = fasttreeshap.TreeExplainer(model, algorithm = "v0", shortcut = False)
+    shap_interaction_values_v0 = explainer_v0(X, interactions = True).values
+
+    # compute SHAP interaction values using FastTreeSHAP v1
+    explainer_v1 = fasttreeshap.TreeExplainer(model, algorithm = "v1", shortcut = False)
+    shap_interaction_values_v1 = explainer_v1(X, interactions = True).values
+
+    # justify the correctness of FastTreeSHAP v1 in SHAP interaction value computation
+    assert np.allclose(shap_interaction_values_v0, shap_interaction_values_v1)
+
+
+def test_fasttreeshap_lightgbm_interaction_regression():
+    lightgbm = pytest.importorskip('lightgbm')
+
+    # train LightGBM model
+    X, y = fasttreeshap.datasets.boston()
+    model = lightgbm.LGBMRegressor(n_estimators = 100, max_depth = 6, learning_rate = 0.1)
+    model.fit(X, y)
+
+    # compute SHAP interaction values using FastTreeSHAP v0 (i.e., original TreeSHAP)
+    explainer_v0 = fasttreeshap.TreeExplainer(model, algorithm = "v0", shortcut = False)
+    shap_interaction_values_v0 = explainer_v0(X, interactions = True).values
+
+    # compute SHAP interaction values using FastTreeSHAP v1
+    explainer_v1 = fasttreeshap.TreeExplainer(model, algorithm = "v1", shortcut = False)
+    shap_interaction_values_v1 = explainer_v1(X, interactions = True).values
+
+    # justify the correctness of FastTreeSHAP v1 in SHAP interaction value computation
+    assert np.allclose(shap_interaction_values_v0, shap_interaction_values_v1)
+
+
+def test_fasttreeshap_sklearn_multiclass_classification():
+
+    # train sklearn models
+    X, y = fasttreeshap.datasets.iris()
+    models = [
+        sklearn.ensemble.RandomForestRegressor(n_estimators = 100, max_depth = 6),
+        sklearn.ensemble.ExtraTreesRegressor(n_estimators = 100, max_depth = 6),
+    ]
+    for model in models:
+        model.fit(X, y)
+
+        # compute SHAP values using FastTreeSHAP v0 (i.e., original TreeSHAP)
+        explainer_v0 = fasttreeshap.TreeExplainer(model, algorithm = "v0")
+        shap_values_v0 = explainer_v0(X).values
+
+        # compute SHAP values using FastTreeSHAP v1
+        explainer_v1 = fasttreeshap.TreeExplainer(model, algorithm = "v1")
+        shap_values_v1 = explainer_v1(X).values
+
+        # compute SHAP values using FastTreeSHAP v2
+        explainer_v2 = fasttreeshap.TreeExplainer(model, algorithm = "v2")
+        shap_values_v2 = explainer_v2(X).values
+
+        # justify the correctness of FastTreeSHAP v1 in SHAP value computation
+        assert np.allclose(shap_values_v0, shap_values_v1)
+
+        # justify the correctness of FastTreeSHAP v2 in SHAP value computation
+        assert np.allclose(shap_values_v0, shap_values_v2)
+
+
+def test_fasttreeshap_xgboost_multiclass_classification():
+    xgboost = pytest.importorskip('xgboost')
+
+    # train XGBoost model
+    X, y = fasttreeshap.datasets.iris()
+    model = xgboost.XGBRegressor(n_estimators = 100, max_depth = 6, learning_rate = 0.1)
+    model.fit(X, y)
+
+    # compute SHAP values using FastTreeSHAP v0 (i.e., original TreeSHAP)
+    explainer_v0 = fasttreeshap.TreeExplainer(model, algorithm = "v0", shortcut = False)
+    shap_values_v0 = explainer_v0(X).values
+
+    # compute SHAP values using FastTreeSHAP v1
+    explainer_v1 = fasttreeshap.TreeExplainer(model, algorithm = "v1", shortcut = False)
+    shap_values_v1 = explainer_v1(X).values
+
+    # compute SHAP values using FastTreeSHAP v2
+    explainer_v2 = fasttreeshap.TreeExplainer(model, algorithm = "v2", shortcut = False)
+    shap_values_v2 = explainer_v2(X).values
+
+    # justify the correctness of FastTreeSHAP v1 in SHAP value computation
+    assert np.allclose(shap_values_v0, shap_values_v1)
+
+    # justify the correctness of FastTreeSHAP v2 in SHAP value computation
+    assert np.allclose(shap_values_v0, shap_values_v2)
+
+
+def test_fasttreeshap_lightgbm_multiclass_classification():
+    lightgbm = pytest.importorskip('lightgbm')
+
+    # train LightGBM model
+    X, y = fasttreeshap.datasets.iris()
+    model = lightgbm.LGBMRegressor(n_estimators = 100, max_depth = 6, learning_rate = 0.1)
+    model.fit(X, y)
+
+    # compute SHAP values using FastTreeSHAP v0 (i.e., original TreeSHAP)
+    explainer_v0 = fasttreeshap.TreeExplainer(model, algorithm = "v0", shortcut = False)
+    shap_values_v0 = explainer_v0(X).values
+
+    # compute SHAP values using FastTreeSHAP v1
+    explainer_v1 = fasttreeshap.TreeExplainer(model, algorithm = "v1", shortcut = False)
+    shap_values_v1 = explainer_v1(X).values
+
+    # compute SHAP values using FastTreeSHAP v2
+    explainer_v2 = fasttreeshap.TreeExplainer(model, algorithm = "v2", shortcut = False)
+    shap_values_v2 = explainer_v2(X).values
+
+    # justify the correctness of FastTreeSHAP v1 in SHAP value computation
+    assert np.allclose(shap_values_v0, shap_values_v1)
+
+    # justify the correctness of FastTreeSHAP v2 in SHAP value computation
+    assert np.allclose(shap_values_v0, shap_values_v2)
+
+
+def test_fasttreeshap_sklearn_interaction_multiclass_classification():
+
+    # train sklearn models
+    X, y = fasttreeshap.datasets.iris()
+    models = [
+        sklearn.ensemble.RandomForestRegressor(n_estimators = 100, max_depth = 6),
+        sklearn.ensemble.ExtraTreesRegressor(n_estimators = 100, max_depth = 6),
+    ]
+    for model in models:
+        model.fit(X, y)
+
+        # compute SHAP interaction values using FastTreeSHAP v0 (i.e., original TreeSHAP)
+        explainer_v0 = fasttreeshap.TreeExplainer(model, algorithm = "v0")
+        shap_interaction_values_v0 = explainer_v0(X, interactions = True).values
+
+        # compute SHAP interaction values using FastTreeSHAP v1
+        explainer_v1 = fasttreeshap.TreeExplainer(model, algorithm = "v1")
+        shap_interaction_values_v1 = explainer_v1(X, interactions = True).values
+
+        # justify the correctness of FastTreeSHAP v1 in SHAP interaction value computation
+        assert np.allclose(shap_interaction_values_v0, shap_interaction_values_v1)
+
+
+def test_fasttreeshap_xgboost_interaction_multiclass_classification():
+    xgboost = pytest.importorskip('xgboost')
+
+    # train XGBoost model
+    X, y = fasttreeshap.datasets.iris()
+    model = xgboost.XGBRegressor(n_estimators = 100, max_depth = 6, learning_rate = 0.1)
+    model.fit(X, y)
+
+    # compute SHAP interaction values using FastTreeSHAP v0 (i.e., original TreeSHAP)
+    explainer_v0 = fasttreeshap.TreeExplainer(model, algorithm = "v0", shortcut = False)
+    shap_interaction_values_v0 = explainer_v0(X, interactions = True).values
+
+    # compute SHAP interaction values using FastTreeSHAP v1
+    explainer_v1 = fasttreeshap.TreeExplainer(model, algorithm = "v1", shortcut = False)
+    shap_interaction_values_v1 = explainer_v1(X, interactions = True).values
+
+    # justify the correctness of FastTreeSHAP v1 in SHAP interaction value computation
+    assert np.allclose(shap_interaction_values_v0, shap_interaction_values_v1)
+
+
+def test_fasttreeshap_lightgbm_interaction_multiclass_classification():
+    lightgbm = pytest.importorskip('lightgbm')
+
+    # train LightGBM model
+    X, y = fasttreeshap.datasets.iris()
+    model = lightgbm.LGBMRegressor(n_estimators = 100, max_depth = 6, learning_rate = 0.1)
+    model.fit(X, y)
+
+    # compute SHAP interaction values using FastTreeSHAP v0 (i.e., original TreeSHAP)
+    explainer_v0 = fasttreeshap.TreeExplainer(model, algorithm = "v0", shortcut = False)
+    shap_interaction_values_v0 = explainer_v0(X, interactions = True).values
+
+    # compute SHAP interaction values using FastTreeSHAP v1
+    explainer_v1 = fasttreeshap.TreeExplainer(model, algorithm = "v1", shortcut = False)
+    shap_interaction_values_v1 = explainer_v1(X, interactions = True).values
+
+    # justify the correctness of FastTreeSHAP v1 in SHAP interaction value computation
+    assert np.allclose(shap_interaction_values_v0, shap_interaction_values_v1)
 
 
 def test_front_page_xgboost():

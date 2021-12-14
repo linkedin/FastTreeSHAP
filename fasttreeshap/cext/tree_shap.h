@@ -672,7 +672,6 @@ inline void tree_shap_recursive_v1(const unsigned num_outputs, const int *childr
 
     // leaf node
     if (children_right[node_index] < 0) {
-        // pre-calculate w_zero for all features not satisfying the thresholds
         const unsigned values_offset = node_index * num_outputs;
         unsigned values_nonzero_ind = 0;
         unsigned values_nonzero_count = 0;
@@ -682,6 +681,7 @@ inline void tree_shap_recursive_v1(const unsigned num_outputs, const int *childr
                 values_nonzero_count++;
             }
         }
+        // pre-calculate w_zero for all features not satisfying the thresholds
         const tfloat w_zero = unwound_path_sum_zero_v1(pweights, unique_depth, unique_depth_pweights);
         const tfloat scale_zero = -w_zero * pweights_residual * condition_fraction;
         tfloat scale;
@@ -831,7 +831,7 @@ inline void compute_combination_sum_recursive_v2(const int *children_left, const
         pweights[0] = 1.0f;
     }
     else {
-        l = static_cast<int>(round(pow(2, unique_depth - 1)));
+        l = static_cast<int>(1 << (unique_depth - 1));
         unique_depth_pweights = parent_unique_depth_pweights + l;
         std::copy(parent_unique_depth_pweights, parent_unique_depth_pweights + l, unique_depth_pweights);
         std::copy(parent_unique_depth_pweights, parent_unique_depth_pweights + l, unique_depth_pweights + l);
@@ -861,7 +861,7 @@ inline void compute_combination_sum_recursive_v2(const int *children_left, const
     // leaf node
     if (children_right[node_index] < 0) {
         // calculate one row of combination_sum for the current path
-        tfloat *leaf_combination_sum = combination_sum + leaf_count[0] * static_cast<int>(round(pow(2, max_depth)));
+        tfloat *leaf_combination_sum = combination_sum + leaf_count[0] * static_cast<int>(1 << max_depth);
         for (unsigned t = 0; t < 2 * l - 1; t++) {
             leaf_combination_sum[t] = 0;
             t_pweights = pweights + t * (max_depth + 1);
@@ -891,7 +891,7 @@ inline void compute_combination_sum_recursive_v2(const int *children_left, const
             incoming_zero_fraction = unique_path[path_index].zero_fraction;
 
             // shrink pweights and unique_path, and update unique_depth_pweights, given the duplicated feature
-            unsigned p = static_cast<int>(round(pow(2, path_index - 1)));
+            unsigned p = static_cast<int>(1 << (path_index - 1));
             unsigned t = 0;
             tfloat *k_pweights;
             for (unsigned j = 0; j < 2 * l; j += 2 * p) {
@@ -937,7 +937,7 @@ inline void compute_combination_sum_recursive_v2(const int *children_left, const
 inline void compute_combination_sum_v2(const TreeEnsemble& tree, tfloat *combination_sum, int *duplicated_node) {
 
     // Pre-allocate space for the unique path data, pweights and unique_depth_pweights
-    const unsigned max_combinations = static_cast<int>(round(pow(2, tree.max_depth)));
+    const unsigned max_combinations = static_cast<int>(1 << tree.max_depth);
     int *unique_depth_pweights = new int[2 * max_combinations];
     tfloat *pweights = new tfloat[2 * max_combinations * (tree.max_depth + 1)];
     PathElement *unique_path_data = new PathElement[(tree.max_depth + 1) * (tree.max_depth + 2) / 2];
@@ -965,10 +965,9 @@ inline void tree_shap_recursive_v2(const unsigned num_outputs, const int *childr
                                    const tfloat *combination_sum, const int *duplicated_node,
                                    const tfloat *x, const bool *x_missing, tfloat *phi,
                                    unsigned node_index, unsigned unique_depth,
-                                   PathElement *parent_unique_path, const int *ptwos,
-                                   tfloat pweights_residual, tfloat parent_zero_fraction,
-                                   tfloat parent_one_fraction, int parent_feature_index,
-                                   int *leaf_count) {
+                                   PathElement *parent_unique_path, tfloat pweights_residual,
+                                   tfloat parent_zero_fraction, tfloat parent_one_fraction,
+                                   int parent_feature_index, int *leaf_count) {
 
     // extend the unique path
     PathElement *unique_path = parent_unique_path + unique_depth;
@@ -986,12 +985,12 @@ inline void tree_shap_recursive_v2(const unsigned num_outputs, const int *childr
 
     // leaf node
     if (children_right[node_index] < 0) {
-        const tfloat *leaf_combination_sum = combination_sum + leaf_count[0] * ptwos[max_depth];
-        // use ptwos_sum to search in the row of combination_sum corresponding to the current path
-        unsigned ptwos_sum = 0;
+        const tfloat *leaf_combination_sum = combination_sum + leaf_count[0] * (1 << max_depth);
+        // use combination_sum_ind to search in the row of combination_sum corresponding to the current path
+        unsigned combination_sum_ind = 0;
         for (unsigned i = 1; i <= unique_depth; ++i) {
             if (unique_path[i].one_fraction != 0) {
-                ptwos_sum += ptwos[i - 1];
+                combination_sum_ind += 1 << (i - 1);
             }
         }
         // update contributions to SHAP values for features satisfying the thresholds and not satisfying the thresholds separately
@@ -1004,11 +1003,11 @@ inline void tree_shap_recursive_v2(const unsigned num_outputs, const int *childr
                 values_nonzero_count++;
             }
         }
-        const tfloat scale_zero = -leaf_combination_sum[ptwos_sum] * pweights_residual;
+        const tfloat scale_zero = -leaf_combination_sum[combination_sum_ind] * pweights_residual;
         for (unsigned i = 1; i <= unique_depth; ++i) {
             const PathElement &el = unique_path[i];
             const unsigned phi_offset = el.feature_index * num_outputs;
-            const tfloat scale = (el.one_fraction != 0) ? leaf_combination_sum[ptwos_sum - ptwos[i - 1]] * \
+            const tfloat scale = (el.one_fraction != 0) ? leaf_combination_sum[combination_sum_ind - (1 << (i - 1))] * \
             pweights_residual * (1 - el.zero_fraction) : scale_zero;
             if (values_nonzero_count == 1) {
                 phi[phi_offset + values_nonzero_ind] += scale * values[values_offset + values_nonzero_ind];
@@ -1051,26 +1050,22 @@ inline void tree_shap_recursive_v2(const unsigned num_outputs, const int *childr
         tree_shap_recursive_v2(
             num_outputs, children_left, children_right, children_default, features, thresholds, values,
             node_sample_weight, max_depth, combination_sum, duplicated_node, x, x_missing, phi,
-            left_index, unique_depth + 1, unique_path, ptwos, pweights_residual,
-            left_zero_fraction * incoming_zero_fraction,
-            incoming_one_fraction * int(x[split_index] <= thresholds[node_index]),
-            split_index, leaf_count
+            left_index, unique_depth + 1, unique_path, pweights_residual, left_zero_fraction * incoming_zero_fraction,
+            incoming_one_fraction * int(x[split_index] <= thresholds[node_index]), split_index, leaf_count
         );
 
         tree_shap_recursive_v2(
             num_outputs, children_left, children_right, children_default, features, thresholds, values,
             node_sample_weight, max_depth, combination_sum, duplicated_node, x, x_missing, phi,
-            right_index, unique_depth + 1, unique_path, ptwos, pweights_residual,
-            right_zero_fraction * incoming_zero_fraction,
-            incoming_one_fraction * int(x[split_index] > thresholds[node_index]),
-            split_index, leaf_count
+            right_index, unique_depth + 1, unique_path, pweights_residual, right_zero_fraction * incoming_zero_fraction,
+            incoming_one_fraction * int(x[split_index] > thresholds[node_index]), split_index, leaf_count
         );
     }
 }
 
 
 inline void tree_shap_v2(const TreeEnsemble& tree, const tfloat *combination_sum, const int *duplicated_node,
-                         const int *ptwos, const ExplanationDataset &data, tfloat *out_contribs) {
+                         const ExplanationDataset &data, tfloat *out_contribs) {
 
     // update the reference value with the expected value of the tree's predictions
     for (unsigned j = 0; j < tree.num_outputs; ++j) {
@@ -1086,7 +1081,7 @@ inline void tree_shap_v2(const TreeEnsemble& tree, const tfloat *combination_sum
         tree.num_outputs, tree.children_left, tree.children_right, tree.children_default,
         tree.features, tree.thresholds, tree.values, tree.node_sample_weights, tree.max_depth,
         combination_sum, duplicated_node, data.X, data.X_missing, out_contribs, 0, 0,
-        unique_path_data, ptwos, 1, 1, 1, -1, leaf_count
+        unique_path_data, 1, 1, 1, -1, leaf_count
     );
 
     delete[] unique_path_data;
@@ -1810,6 +1805,22 @@ inline void dense_independent(const TreeEnsemble& trees, const ExplanationDatase
 
 
 /**
+ * This calculates array for distributing threads evenly across trees (in terms of tree size) for algorithm v2
+ */
+inline void tree_thread_v2(int *tree_thread, const unsigned int n_jobs, const unsigned int tree_limit) {
+    unsigned t = 0;
+    for (unsigned i = 0; i < n_jobs; ++i) {
+        unsigned j = i;
+        while (j < tree_limit) {
+            tree_thread[t] = j;
+            j += n_jobs;
+            t++;
+        }
+    }
+}
+
+
+/**
  * This runs Tree SHAP with a per tree path conditional dependence assumption.
  */
 inline void dense_tree_path_dependent(const TreeEnsemble& trees, const ExplanationDataset &data,
@@ -1820,26 +1831,10 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
 
     // pre-define variables for algorithm v2
     const unsigned max_leaves = (trees.max_nodes + 1) / 2;
-    const unsigned max_combinations = static_cast<int>(round(pow(2, trees.max_depth)));
+    const unsigned max_combinations = static_cast<int>(1 << trees.max_depth);
     tfloat *combination_sum;
     int *duplicated_node;
-    // pre-compute values of powers of two
-    int *ptwos = new int[trees.max_depth + 1];
-    ptwos[0] = 1;
-    for (unsigned i = 1; i < trees.max_depth + 1; i++) {
-      ptwos[i] = ptwos[i - 1] * 2;
-    }
-    // array for distributing threads for algorithm v2
-    int *tree_thread = new int[trees.tree_limit];
-    unsigned t = 0;
-    for (unsigned i = 0; i < n_jobs; ++i) {
-        unsigned j = i;
-        while (j < trees.tree_limit) {
-            tree_thread[t] = j;
-            j += n_jobs;
-            t++;
-        }
-    }
+    int *tree_thread;
 
     // dispatch to the correct algorithm version
     switch (algorithm) {
@@ -1879,6 +1874,10 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
             // pre-define variables for parallel computing
             tfloat *out_contribs_local;
             tfloat *instance_out_contribs_local;
+            
+            // array for distributing threads evenly across trees
+            tree_thread = new int[trees.tree_limit];
+            tree_thread_v2(tree_thread, n_jobs, trees.tree_limit);
 
             // compute combination sum for each tree and aggregate the effect of explaining each tree
             // (this works because of the linearity property of Shapley values)
@@ -1904,7 +1903,7 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
                     for (unsigned i = 0; i < data.num_X; ++i) {
                         instance_out_contribs_local = out_contribs_local + i * (data.M + 1) * trees.num_outputs;
                         data.get_x_instance(instance, i);
-                        tree_shap_v2(tree, combination_sum, duplicated_node, ptwos, instance, instance_out_contribs_local);
+                        tree_shap_v2(tree, combination_sum, duplicated_node, instance, instance_out_contribs_local);
                     }
                 }
                 delete[] combination_sum;
@@ -1920,6 +1919,7 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
                 }
                 delete[] out_contribs_local;
             }
+            delete[] tree_thread;
             return;
 
         case ALGORITHM::v2_2:
@@ -1930,6 +1930,10 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
             // pre-define variables for parallel computing
             tfloat *combination_sum_local;
             int *duplicated_node_local;
+
+            // array for distributing threads evenly across trees
+            tree_thread = new int[trees.tree_limit];
+            tree_thread_v2(tree_thread, n_jobs, trees.tree_limit);
 
             // compute combination sum for each tree
             #pragma omp parallel private(tree, combination_sum_local, duplicated_node_local) num_threads(n_jobs)
@@ -1955,15 +1959,15 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
                         combination_sum_local = combination_sum + j * max_leaves * max_combinations;
                         duplicated_node_local = duplicated_node + j * trees.max_nodes;
                         trees.get_tree(tree, j);
-                        tree_shap_v2(tree, combination_sum_local, duplicated_node_local, ptwos, instance, instance_out_contribs);
+                        tree_shap_v2(tree, combination_sum_local, duplicated_node_local, instance, instance_out_contribs);
                     }
                 }
             }
             delete[] combination_sum;
             delete[] duplicated_node;
+            delete[] tree_thread;
             return;
     }
-    delete[] ptwos;
 
     // apply the base offset to the bias term
     for (unsigned i = 0; i < data.num_X; ++i) {
