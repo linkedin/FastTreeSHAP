@@ -13,17 +13,7 @@ from ._explanation import Explanation, Cohorts
 
 # explainers
 from .explainers._explainer import Explainer
-from .explainers._kernel import Kernel as KernelExplainer
-from .explainers._sampling import Sampling as SamplingExplainer
 from .explainers._tree import Tree as TreeExplainer
-from .explainers._gpu_tree import GPUTree as GPUTreeExplainer
-from .explainers._deep import Deep as DeepExplainer
-from .explainers._gradient import Gradient as GradientExplainer
-from .explainers._linear import Linear as LinearExplainer
-from .explainers._partition import Partition as PartitionExplainer
-from .explainers._permutation import Permutation as PermutationExplainer
-from .explainers._additive import Additive as AdditiveExplainer
-from .explainers import other
 
 # plotting (only loaded if matplotlib is present)
 def unsupported(*args, **kwargs):
@@ -68,8 +58,6 @@ else:
 from . import datasets
 from . import utils
 from . import links
-
-from .actions._optimizer import ActionOptimizer
 
 #from . import benchmark
 

@@ -68,66 +68,8 @@ def find_in_path(name, path):
     return None
 
 
-def get_cuda_path():
-    """Return a tuple with (base_cuda_directory, full_path_to_nvcc_compiler)."""
-    # Inspired by https://github.com/benfred/implicit/blob/master/cuda_setup.py
-    nvcc_bin = "nvcc.exe" if sys.platform == "win32" else "nvcc"
-
-    if "CUDAHOME" in os.environ:
-        cuda_home = os.environ["CUDAHOME"]
-    elif "CUDA_PATH" in os.environ:
-        cuda_home = os.environ["CUDA_PATH"]
-    else:
-        # otherwise, search the PATH for NVCC
-        found_nvcc = find_in_path(nvcc_bin, os.environ["PATH"])
-        if found_nvcc is None:
-            print(
-                "The nvcc binary could not be located in your $PATH. Either " +
-                " add it to your path, or set $CUDAHOME to enable CUDA"
-            )
-            return None
-        cuda_home = os.path.dirname(os.path.dirname(found_nvcc))
-    if not os.path.exists(os.path.join(cuda_home, "include")):
-        print("Failed to find cuda include directory, using /usr/local/cuda")
-        cuda_home = "/usr/local/cuda"
-
-    nvcc = os.path.join(cuda_home, "bin", nvcc_bin)
-    if not os.path.exists(nvcc):
-        print("Failed to find nvcc compiler in %s, trying /usr/local/cuda" % nvcc)
-        cuda_home = "/usr/local/cuda"
-        nvcc = os.path.join(cuda_home, "bin", nvcc_bin)
-
-    return (cuda_home, nvcc)
-
-
-def compile_cuda_module(host_args):
-    libname = '_cext_gpu.lib' if sys.platform == 'win32' else 'lib_cext_gpu.a'
-    lib_out = 'build/' + libname
-    if not os.path.exists('build/'):
-        os.makedirs('build/')
-
-    cuda_home, nvcc = get_cuda_path()
-
-    print("NVCC ==> ", nvcc)
-    arch_flags = "-arch=sm_60 " + \
-                 "-gencode=arch=compute_70,code=sm_70 " + \
-                 "-gencode=arch=compute_75,code=sm_75 " + \
-                 "-gencode=arch=compute_75,code=compute_75"
-    nvcc_command = "fasttreeshap/cext/_cext_gpu.cu -lib -o {} -Xcompiler {} -I{} " \
-                   "--std c++14 " \
-                   "--expt-extended-lambda " \
-                   "--expt-relaxed-constexpr {}".format(
-                       lib_out,
-                       ','.join(host_args),
-                       get_python_inc(), arch_flags)
-    print("Compiling cuda extension, calling nvcc with arguments:")
-    print([nvcc] + nvcc_command.split(' '))
-    subprocess.run([nvcc] + nvcc_command.split(' '), check=True)
-    return 'build', '_cext_gpu'
-
-
 def run_setup(with_binary, with_openmp, test_xgboost, test_lightgbm, test_catboost, test_spark, test_pyod,
-              with_cuda, test_transformers, test_pytorch, test_sentencepiece, test_opencv):
+              test_transformers, test_pytorch, test_sentencepiece, test_opencv):
     ext_modules = []
     if with_binary:
         compile_args = []
@@ -147,26 +89,6 @@ def run_setup(with_binary, with_openmp, test_xgboost, test_lightgbm, test_catboo
         ext_modules.append(
             Extension('fasttreeshap._cext', sources=['fasttreeshap/cext/_cext.cc'],
                       extra_compile_args=compile_args, extra_link_args=link_args))
-    if with_cuda:
-        try:
-            cuda_home, nvcc = get_cuda_path()
-            if sys.platform == 'win32':
-                cudart_path = cuda_home + '/lib/x64'
-            else:
-                cudart_path = cuda_home + '/lib64'
-                compile_args.append('-fPIC')
-
-            lib_dir, lib = compile_cuda_module(compile_args)
-
-            ext_modules.append(
-                Extension('fasttreeshap._cext_gpu', sources=['fasttreeshap/cext/_cext_gpu.cc'],
-                          extra_compile_args=compile_args,
-                          library_dirs=[lib_dir, cudart_path],
-                          libraries=[lib, 'cudart'],
-                          depends=['fasttreeshap/cext/_cext_gpu.cu', 'fasttreeshap/cext/gpu_treeshap.h','setup.py'])
-            )
-        except Exception as e:
-            raise Exception("Error building cuda module: " + repr(e))
 
     tests_require = ['pytest', 'pytest-mpl', 'pytest-cov']
     if test_xgboost:
@@ -221,10 +143,8 @@ def run_setup(with_binary, with_openmp, test_xgboost, test_lightgbm, test_catboo
         author_email='jlyang@linkedin.com',
         license='BSD 2-CLAUSE',
         packages=[
-            'fasttreeshap', 'fasttreeshap.explainers', 'fasttreeshap.explainers.other',
-            'fasttreeshap.explainers._deep', 'fasttreeshap.plots', 'fasttreeshap.plots.colors',
-            'fasttreeshap.benchmark', 'fasttreeshap.maskers', 'fasttreeshap.utils',
-            'fasttreeshap.actions', 'fasttreeshap.models'
+            'fasttreeshap', 'fasttreeshap.explainers', 'fasttreeshap.plots', 'fasttreeshap.plots.colors',
+            'fasttreeshap.maskers', 'fasttreeshap.utils', 'fasttreeshap.models'
         ],
         package_data={'fasttreeshap': ['plots/resources/*', 'cext/tree_shap.h']},
         cmdclass={'build_ext': build_ext},
@@ -262,10 +182,6 @@ def try_run_setup(**kwargs):
             kwargs["test_catboost"] = False
             print("Couldn't install CatBoost for testing!")
             try_run_setup(**kwargs)
-        elif "cuda" in str(e).lower():
-            kwargs["with_cuda"] = False
-            print("WARNING: Could not compile cuda extensions")
-            try_run_setup(**kwargs)
         elif kwargs["with_binary"]:
             kwargs["with_binary"] = False
             print("WARNING: The C extension could not be compiled, sklearn tree models not supported.")
@@ -294,6 +210,6 @@ def try_run_setup(**kwargs):
 if __name__ == "__main__":
     try_run_setup(
         with_binary=True, with_openmp=True, test_xgboost=True, test_lightgbm=True, test_catboost=True,
-        test_spark=True, test_pyod=True, with_cuda=True, test_transformers=True, test_pytorch=True,
+        test_spark=True, test_pyod=True, test_transformers=True, test_pytorch=True,
         test_sentencepiece=True, test_opencv=True
     )

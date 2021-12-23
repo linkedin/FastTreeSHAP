@@ -5,8 +5,6 @@ import scipy as sp
 from .. import maskers
 from .. import links
 from ..utils import safe_isinstance, show_progress
-from ..utils.transformers import is_transformers_lm
-from .. import models
 from ..models import Model
 from ..maskers import Masker
 from .._explanation import Explanation
@@ -77,49 +75,13 @@ class Explainer(Serializable):
         # wrap the incoming masker object as a shap.Masker object
         if safe_isinstance(masker, "pandas.core.frame.DataFrame") or \
                 ((safe_isinstance(masker, "numpy.ndarray") or sp.sparse.issparse(masker)) and len(masker.shape) == 2):
-            if algorithm == "partition":
-                self.masker = maskers.Partition(masker)
-            else:
-                self.masker = maskers.Independent(masker)
-        elif safe_isinstance(masker, ["transformers.PreTrainedTokenizer", "transformers.tokenization_utils_base.PreTrainedTokenizerBase"]):
-            if is_transformers_lm(self.model):
-                # auto assign text infilling if model is a transformer model with lm head
-                self.masker = maskers.Text(masker, mask_token="...", collapse_mask_token=True)
-            else:
-                self.masker = maskers.Text(masker)
+            self.masker = maskers.Independent(masker)
         elif (masker is list or masker is tuple) and masker[0] is not str:
             self.masker = maskers.Composite(*masker)
         elif (masker is dict) and ("mean" in masker):
             self.masker = maskers.Independent(masker)
-        elif masker is None and isinstance(self.model, models.TransformersPipeline):
-            return self.__init__( # pylint: disable=non-parent-init-called
-                self.model, self.model.inner_model.tokenizer,
-                link=link, algorithm=algorithm, output_names=output_names, feature_names=feature_names, linearize_link=linearize_link, **kwargs
-            )
         else:
             self.masker = masker
-
-        # Check for transformer pipeline objects and wrap them
-        if safe_isinstance(self.model, "transformers.pipelines.Pipeline"):
-            if is_transformers_lm(self.model.model):
-                return self.__init__( # pylint: disable=non-parent-init-called
-                    self.model.model, self.model.tokenizer if self.masker is None else self.masker,
-                    link=link, algorithm=algorithm, output_names=output_names, feature_names=feature_names, linearize_link=linearize_link, **kwargs
-                )
-            else:
-                return self.__init__( # pylint: disable=non-parent-init-called
-                    models.TransformersPipeline(self.model), self.masker,
-                    link=link, algorithm=algorithm, output_names=output_names, feature_names=feature_names, linearize_link=linearize_link, **kwargs
-                )
-
-        # wrap self.masker and self.model for output text explanation algorithm
-        if is_transformers_lm(self.model):
-            self.model = models.TeacherForcing(self.model, self.masker.tokenizer)
-            self.masker = maskers.OutputComposite(self.masker, self.model.text_generate)
-        elif safe_isinstance(self.model, "shap.models.TeacherForcing") and safe_isinstance(self.masker, ["shap.maskers.Text", "shap.maskers.Image"]):
-            self.masker = maskers.OutputComposite(self.masker, self.model.text_generate)
-        elif safe_isinstance(self.model, "shap.models.TopKLM") and safe_isinstance(self.masker, "shap.maskers.Text"):
-            self.masker = maskers.FixedComposite(self.masker)
 
         #self._brute_force_fallback = explainers.BruteForce(self.model, self.masker)
 
@@ -134,58 +96,10 @@ class Explainer(Serializable):
         # that implements the specific algorithm that was chosen
         if self.__class__ is Explainer:
 
-            # do automatic algorithm selection
-            #from .. import explainers
-            if algorithm == "auto":
-
-                # use implementation-aware methods if possible
-                if explainers.Linear.supports_model_with_masker(model, self.masker):
-                    algorithm = "linear"
-                elif explainers.Tree.supports_model_with_masker(model, self.masker): # TODO: check for Partition?
-                    algorithm = "tree"
-                elif explainers.Additive.supports_model_with_masker(model, self.masker):
-                    algorithm = "additive"
-
-                # otherwise use a model agnostic method
-                elif callable(self.model):
-                    if issubclass(type(self.masker), maskers.Independent):
-                        if self.masker.shape[1] <= 10:
-                            algorithm = "exact"
-                        else:
-                            algorithm = "permutation"
-                    elif issubclass(type(self.masker), maskers.Partition):
-                        if self.masker.shape[1] <= 32:
-                            algorithm = "exact"
-                        else:
-                            algorithm = "permutation"
-                    elif (getattr(self.masker, "text_data", False) or getattr(self.masker, "image_data", False)) and hasattr(self.masker, "clustering"):
-                        algorithm = "partition"
-                    else:
-                        algorithm = "permutation"
-
-                # if we get here then we don't know how to handle what was given to us
-                else:
-                    raise Exception("The passed model is not callable and cannot be analyzed directly with the given masker! Model: " + str(model))
-
             # build the right subclass
-            if algorithm == "exact":
-                self.__class__ = explainers.Exact
-                explainers.Exact.__init__(self, self.model, self.masker, link=self.link, feature_names=self.feature_names, linearize_link=linearize_link, **kwargs)
-            elif algorithm == "permutation":
-                self.__class__ = explainers.Permutation
-                explainers.Permutation.__init__(self, self.model, self.masker, link=self.link, feature_names=self.feature_names, linearize_link=linearize_link, **kwargs)
-            elif algorithm == "partition":
-                self.__class__ = explainers.Partition
-                explainers.Partition.__init__(self, self.model, self.masker, link=self.link, feature_names=self.feature_names, linearize_link=linearize_link, output_names=self.output_names, **kwargs)
-            elif algorithm == "tree":
+            if algorithm == "tree":
                 self.__class__ = explainers.Tree
                 explainers.Tree.__init__(self, self.model, self.masker, link=self.link, feature_names=self.feature_names, linearize_link=linearize_link, **kwargs)
-            elif algorithm == "additive":
-                self.__class__ = explainers.Additive
-                explainers.Additive.__init__(self, self.model, self.masker, link=self.link, feature_names=self.feature_names, linearize_link=linearize_link, **kwargs)
-            elif algorithm == "linear":
-                self.__class__ = explainers.Linear
-                explainers.Linear.__init__(self, self.model, self.masker, link=self.link, feature_names=self.feature_names, linearize_link=linearize_link, **kwargs)
             else:
                 raise Exception("Unknown algorithm type passed: %s!" % algorithm)
 
@@ -204,9 +118,6 @@ class Explainer(Serializable):
 
         start_time = time.time()
 
-        if issubclass(type(self.masker), maskers.OutputComposite) and len(args)==2:
-            self.masker.model = models.TextGeneration(target_sentences=args[1])
-            args = args[:1]
         # parse our incoming arguments
         num_rows = None
         args = list(args)
