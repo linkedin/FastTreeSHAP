@@ -22,7 +22,7 @@ class Explainer(Serializable):
     the particular estimation algorithm that was chosen.
     """
 
-    def __init__(self, model, masker=None, link=links.identity, algorithm="auto", output_names=None, feature_names=None, linearize_link=True, **kwargs):
+    def __init__(self, model, masker=None, link=links.identity, algorithm="tree", output_names=None, feature_names=None, linearize_link=True, **kwargs):
         """ Build a new explainer for the passed model.
 
         Parameters
