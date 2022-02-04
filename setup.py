@@ -80,11 +80,10 @@ def run_setup(with_binary, with_openmp, test_xgboost, test_lightgbm, test_catboo
             compile_args.append('/MD')
         if with_openmp:
             if sys.platform == "darwin":
-                compile_args.append('-Xpreprocessor')
-                link_args.append('-lomp')
+                compile_args += ['-Xpreprocessor', '-fopenmp', '-lomp']
             else:
+                compile_args.append('-fopenmp')
                 link_args.append('-fopenmp')
-            compile_args.append('-fopenmp')
 
         ext_modules.append(
             Extension('fasttreeshap._cext', sources=['fasttreeshap/cext/_cext.cc'],

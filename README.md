@@ -50,6 +50,12 @@ cd fasttreeshap
 pip install .
 ```
 
+Installation troubleshooting:
+* On Macbook, if an error message `ld: library not found for -lomp` pops up, run the following command line before installation ([Reference](https://iscinumpy.gitlab.io/post/omp-on-high-sierra)):
+```sh
+brew install libomp
+```
+
 ## Usage
 
 The following screenshot shows a typical use case of FastTreeSHAP on [Census Income Data](https://archive.ics.uci.edu/ml/datasets/census+income). Note that the usage of FastTreeSHAP is exactly the same as the usage of [SHAP](https://github.com/slundberg/shap), except for three additional arguments in the class `TreeExplainer`: `algorithm`, `n_jobs`, and `shortcut`.
