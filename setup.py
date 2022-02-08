@@ -132,14 +132,14 @@ def run_setup(with_binary, with_openmp, test_xgboost, test_lightgbm, test_catboo
     setup(
         name='fasttreeshap',
         version=find_version("fasttreeshap", "__init__.py"),
-        description='A fast version of TreeSHAP algorithm.',
-        long_description="Fast TreeSHAP v1 and v2 are developed to improve the computational "
-                        +"efficiency of TreeSHAP for large datasets, and in practice v1 is 1.5x "
-                        +"faster, and v2 is 2.5x faster at the cost of a slightly higher memory usage.",
+        description='A fast implementation of TreeSHAP algorithm.',
+        long_description="FastTreeSHAP package implements two new algorithms FastTreeSHAP v1 and FastTreeSHAP v2, to improve the computational "
+                        +"efficiency of TreeSHAP for large datasets. In practice FastTreeSHAP v1 is 1.5x faster than TreeSHAP while keeping "
+                        +"the memory cost unchanged, and FastTreeSHAP v2 is 2.5x faster than TreeSHAP at the cost of a slightly higher memory usage.",
         long_description_content_type="text/markdown",
         url='http://github.com/linkedin/fasttreeshap',
         author='Jilei Yang',
-        author_email='jlyang@linkedin.com',
+        author_email='jlyang0712@gmail.com',
         license='BSD 2-CLAUSE',
         packages=[
             'fasttreeshap', 'fasttreeshap.explainers', 'fasttreeshap.plots', 'fasttreeshap.plots.colors',

@@ -42,12 +42,10 @@ The table below compares the execution times of FastTreeSHAP v1 and FastTreeSHAP
 
 ## Installation
 
-You can clone the repository and install using pip:
+FastTreeSHAP package is available on PyPI and can be installed with pip:
 
 ```sh
-git clone https://github.com/linkedin/fasttreeshap.git
-cd fasttreeshap
-pip install .
+pip install fasttreeshap
 ```
 
 Installation troubleshooting:
