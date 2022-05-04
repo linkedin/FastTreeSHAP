@@ -361,7 +361,7 @@ class Tree(Explainer):
         if self.algorithm == "auto":
             # check if number of samples to be explained is sufficiently large
             num_samples = X.shape[0]
-            num_samples_threshold = 2**(self.model.max_depth + 1) / self.model.max_depth
+            num_samples_threshold = 2**int(self.model.max_depth + 1) / self.model.max_depth
             num_samples_check = (num_samples >= num_samples_threshold)
             # check if memory constraint is satisfied (check Section Notes in README.md for justifications of memory check conditions in function _memory_check)
             memory_check_1, memory_check_2 = self._memory_check(X)
@@ -481,7 +481,7 @@ class Tree(Explainer):
     # check if memory constraint is satisfied (check Section Notes in README.md for justifications of memory check conditions in this function)
     def _memory_check(self, X):
         max_leaves = (max(self.model.num_nodes) + 1) / 2
-        max_combinations = 2**self.model.max_depth
+        max_combinations = 2**int(self.model.max_depth)
         phi_dim = X.shape[0] * (X.shape[1] + 1) * self.model.num_outputs
         memory_usage_1 = (max_leaves * max_combinations + phi_dim) * 8 * self.n_jobs
         memory_usage_2 = max_leaves * max_combinations * self.model.values.shape[0] * 8
