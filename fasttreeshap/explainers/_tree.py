@@ -357,34 +357,6 @@ class Tree(Explainer):
         if tree_limit is None:
             tree_limit = -1 if self.model.tree_limit is None else self.model.tree_limit
 
-        # choose the most appropriate TreeSHAP algorithm
-        if self.algorithm == "auto":
-            # check if number of samples to be explained is sufficiently large
-            num_samples = X.shape[0]
-            num_samples_threshold = 2**int(self.model.max_depth + 1) / self.model.max_depth
-            num_samples_check = (num_samples >= num_samples_threshold)
-            # check if memory constraint is satisfied (check Section Notes in README.md for justifications of memory check conditions in function _memory_check)
-            memory_check_1, memory_check_2 = self._memory_check(X)
-            if num_samples_check and (memory_check_1 or memory_check_2):
-                if memory_check_1:
-                    algorithm = "v2_1"
-                else:
-                    algorithm = "v2_2"
-            else:
-                algorithm = "v1"
-        else:
-            algorithm = self.algorithm
-            if algorithm == "v2":
-                # check if memory constraint is satisfied (check Section Notes in README.md for justifications of memory check conditions in function _memory_check)
-                memory_check_1, memory_check_2 = self._memory_check(X)
-                if memory_check_1:
-                    algorithm = "v2_1"
-                elif memory_check_2:
-                    algorithm = "v2_2"
-                else:
-                    warnings.warn("There may exist memory issue for algorithm v2. Switched to algorithm v1.")
-                    algorithm = "v1"
-
         # shortcut using the C++ version of Tree SHAP in XGBoost, LightGBM, and CatBoost
         if self.feature_perturbation == "tree_path_dependent" and self.model.model_type != "internal" and self.data is None:
             model_output_vals = None
@@ -446,6 +418,34 @@ class Tree(Explainer):
                     self.assert_additivity(out, model_output_vals)
 
                 return out
+
+        # choose the most appropriate TreeSHAP algorithm
+        if self.algorithm == "auto":
+            # check if number of samples to be explained is sufficiently large
+            num_samples = X.shape[0]
+            num_samples_threshold = 2**int(self.model.max_depth + 1) / self.model.max_depth
+            num_samples_check = (num_samples >= num_samples_threshold)
+            # check if memory constraint is satisfied (check Section Notes in README.md for justifications of memory check conditions in function _memory_check)
+            memory_check_1, memory_check_2 = self._memory_check(X)
+            if num_samples_check and (memory_check_1 or memory_check_2):
+                if memory_check_1:
+                    algorithm = "v2_1"
+                else:
+                    algorithm = "v2_2"
+            else:
+                algorithm = "v1"
+        else:
+            algorithm = self.algorithm
+            if algorithm == "v2":
+                # check if memory constraint is satisfied (check Section Notes in README.md for justifications of memory check conditions in function _memory_check)
+                memory_check_1, memory_check_2 = self._memory_check(X)
+                if memory_check_1:
+                    algorithm = "v2_1"
+                elif memory_check_2:
+                    algorithm = "v2_2"
+                else:
+                    warnings.warn("There may exist memory issue for algorithm v2. Switched to algorithm v1.")
+                    algorithm = "v1"
 
         X, y, X_missing, flat_output, tree_limit, check_additivity = self._validate_inputs(X, y,
                                                                                            tree_limit,
