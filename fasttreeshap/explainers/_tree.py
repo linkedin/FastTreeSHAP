@@ -60,7 +60,7 @@ class Tree(Explainer):
     implementations either inside an externel model package or in the local compiled C extention.
     """
 
-    def __init__(self, model, data = None, model_output="raw", feature_perturbation="interventional", algorithm="auto", n_jobs=-1, feature_names=None, approximate=False, shortcut=False, **deprecated_options):
+    def __init__(self, model, data = None, model_output="raw", feature_perturbation="tree_path_dependent", algorithm="auto", n_jobs=-1, memory_tolerance=-1, feature_names=None, approximate=False, shortcut=False, **deprecated_options):
         """ Build a new Tree explainer for the passed model.
 
         Parameters
@@ -98,6 +98,10 @@ class Tree(Explainer):
             Number of parallel threads used to run Fast TreeSHAP. The default value of n_jobs is -1, which utilizes
             all available cores in parallel computing (Setting OMP_NUM_THREADS is unnecessary since n_jobs will
             overwrite this parameter).
+
+        memory_tolerance : -1 (default), or a positive number
+            Upper limit of memory allocation (in GB) to run Fast TreeSHAP v2. The default value of memory_tolerance is -1,
+            which allocates a maximum of 0.25 * total memory of the machine to run Fast TreeSHAP v2.
 
         model_output : "raw", "probability", "log_loss", or model method name
             What output of the model should be explained. If "raw" then we explain the raw output of the
@@ -182,6 +186,7 @@ class Tree(Explainer):
             self.n_jobs = 1
         else:
             self.n_jobs = min(int(n_jobs), os.cpu_count())
+        self.memory_tolerance = memory_tolerance
         self.expected_value = None
         self.model = TreeEnsemble(model, self.data, self.data_missing, model_output)
         self.model_output = model_output
@@ -490,6 +495,8 @@ class Tree(Explainer):
             memory_tolerance = 0.25 * psutil.virtual_memory().total
         except:
             memory_tolerance = 4294967296  # 4GB
+        if self.memory_tolerance > 0:
+            memory_tolerance = min(memory_tolerance, self.memory_tolerance * 1073741824)
         return memory_usage_1 <= memory_tolerance, memory_usage_2 <= memory_tolerance
 
 

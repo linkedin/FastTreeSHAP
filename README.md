@@ -58,7 +58,7 @@ brew install libomp
 
 ## Usage
 
-The following screenshot shows a typical use case of FastTreeSHAP on [Census Income Data](https://archive.ics.uci.edu/ml/datasets/census+income). Note that the usage of FastTreeSHAP is exactly the same as the usage of [SHAP](https://github.com/slundberg/shap), except for three additional arguments in the class `TreeExplainer`: `algorithm`, `n_jobs`, and `shortcut`.
+The following screenshot shows a typical use case of FastTreeSHAP on [Census Income Data](https://archive.ics.uci.edu/ml/datasets/census+income). Note that the usage of FastTreeSHAP is exactly the same as the usage of [SHAP](https://github.com/slundberg/shap), except for four additional arguments in the class `TreeExplainer`: `algorithm`, `n_jobs`, `memory_tolerance`, and `shortcut`.
 
 `algorithm`: This argument specifies the TreeSHAP algorithm used to run FastTreeSHAP. It can take values `"v0"`, `"v1"`, `"v2"` or `"auto"`, and its default value is `"auto"`:
 * `"v0"`: Original TreeSHAP algorithm in [SHAP](https://github.com/slundberg/shap) package.
@@ -67,6 +67,8 @@ The following screenshot shows a typical use case of FastTreeSHAP on [Census Inc
 * `"auto"` (default): Automatic selection between `"v0"`, `"v1"` and `"v2"` according to the number of samples to be explained and the constraint on the allocated memory. Specifically, `"v1"` is always preferred to `"v0"` in any use cases, and `"v2"` is preferred to `"v1"` when the number of samples to be explained is sufficiently large (<img src="https://latex.codecogs.com/svg.latex?M>2^{D+1}/D"/>), and the memory constraint is also satisfied (<img src="https://latex.codecogs.com/svg.latex?min\{(MN+L2^D){\cdot}C,\;TL2^D\}\cdot8Byte<0.25{\cdot}Total\,Memory"/>, <img src="https://latex.codecogs.com/svg.latex?C"/> is the number of threads). More detailed discussion of the above criteria can be found in [FastTreeSHAP](https://arxiv.org/abs/2109.09847) paper and in Section [Notes](#notes).
 
 `n_jobs`: This argument specifies the number of parallel threads used to run FastTreeSHAP. It can take values `-1` or a positive integer. Its default value is `-1`, which means utilizing all available cores in parallel computing.
+
+`memory_tolerance`: This argument specifies the upper limit of memory allocation (in GB) to run FastTreeSHAP v2. It can take values `-1` or a positive number. Its default value is `-1`, which means allocating a maximum of 0.25 * total memory of the machine to run FastTreeSHAP v2.
 
 `shortcut`: This argument determines whether to use the TreeSHAP algorithm embedded in [XGBoost](https://github.com/dmlc/xgboost), [LightGBM](https://github.com/microsoft/LightGBM), and [CatBoost](https://github.com/catboost/catboost) packages directly when computing SHAP values for XGBoost, LightGBM, and CatBoost models and when computing SHAP interaction values for XGBoost models. Its default value is `False`, which means bypassing the "shortcut" and using the code in FastTreeSHAP package directly to compute SHAP values for XGBoost, LightGBM, and CatBoost models. Note that currently `shortcut` is automaticaly set to be True for CatBoost model, as we are working on CatBoost component in FastTreeSHAP package. More details of the usage of "shortcut" can be found in the notebooks [Census Income](notebooks/FastTreeSHAP_Census_Income.ipynb), [Superconductor](notebooks/FastTreeSHAP_Superconductor.ipynb), and [Crop Mapping](notebooks/FastTreeSHAP_Crop_Mapping.ipynb).
 
