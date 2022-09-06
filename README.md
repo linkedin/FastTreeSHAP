@@ -1,5 +1,8 @@
 # FastTreeSHAP
 
+[![PyPI Version](https://badge.fury.io/py/fasttreeshap.svg)](https://pypi.org/project/fasttreeshap)
+[![Downloads](https://pepy.tech/badge/fasttreeshap)](https://pepy.tech/project/fasttreeshap)
+
 FastTreeSHAP package is built based on the paper [Fast TreeSHAP: Accelerating SHAP Value Computation for Trees](https://arxiv.org/abs/2109.09847) published in [NeurIPS 2021 XAI4Debugging Workshop](https://xai4debugging.github.io/). It is a fast implementation of the [TreeSHAP](https://arxiv.org/abs/1802.03888) algorithm in the [SHAP](https://github.com/slundberg/shap) package.
 
 For more detailed introduction of FastTreeSHAP package, please check out this [blogpost](https://engineering.linkedin.com/blog/2022/fasttreeshap--accelerating-shap-value-computation-for-trees).
