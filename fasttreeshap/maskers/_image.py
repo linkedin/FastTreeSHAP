@@ -76,7 +76,7 @@ class Image(Masker):
 
         # if mask is not given then we mask the whole image
         if mask is None:
-            mask = np.zeros(np.prod(x.shape), dtype=np.bool)
+            mask = np.zeros(np.prod(x.shape), dtype=bool)
 
         if isinstance(self.mask_value, str):
             if self.blur_kernel is not None:
