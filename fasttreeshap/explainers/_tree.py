@@ -1602,8 +1602,8 @@ class XGBTreeModelLoader(object):
 
     def get_trees(self, data=None, data_missing=None):
         shape = (self.num_trees, self.num_nodes.max())
-        self.children_default = np.zeros(shape, dtype=np.int)
-        self.features = np.zeros(shape, dtype=np.int)
+        self.children_default = np.zeros(shape, dtype=int)
+        self.features = np.zeros(shape, dtype=int)
         self.thresholds = np.zeros(shape, dtype=np.float32)
         self.values = np.zeros((shape[0], shape[1], 1), dtype=np.float32)
         trees = []
