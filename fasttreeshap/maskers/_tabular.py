@@ -1,7 +1,7 @@
 import logging
 import pandas as pd
 import numpy as np
-from numba import jit
+from numba import njit
 from .. import utils
 from ..utils import safe_isinstance, MaskedModel
 from ._masker import Masker
@@ -181,7 +181,7 @@ class Tabular(Masker):
             kwargs["clustering"] = s.load("clustering")
         return kwargs
 
-@jit
+@njit
 def _single_delta_mask(dind, masked_inputs, last_mask, data, x, noop_code):
     if dind == noop_code:
         pass
@@ -192,7 +192,7 @@ def _single_delta_mask(dind, masked_inputs, last_mask, data, x, noop_code):
         masked_inputs[:, dind] = x[dind]
         last_mask[dind] = True
 
-@jit
+@njit
 def _delta_masking(masks, x, curr_delta_inds, varying_rows_out,
                    masked_inputs_tmp, last_mask, data, variants, masked_inputs_out, noop_code):
     """ Implements the special (high speed) delta masking API that only flips the positions we need to.
