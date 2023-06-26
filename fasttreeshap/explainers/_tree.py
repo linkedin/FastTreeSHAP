@@ -1593,7 +1593,7 @@ class XGBTreeModelLoader(object):
             self.loss_chg.append(np.zeros(self.num_nodes[i], dtype=np.float32))
             self.sum_hess.append(np.zeros(self.num_nodes[i], dtype=np.float32))
             self.base_weight.append(np.zeros(self.num_nodes[i], dtype=np.float32))
-            self.leaf_child_cnt.append(np.zeros(self.num_nodes[i], dtype=np.int))
+            self.leaf_child_cnt.append(np.zeros(self.num_nodes[i], dtype=int))
             for j in range(self.num_nodes[i]):
                 self.loss_chg[-1][j] = self.read('f')
                 self.sum_hess[-1][j] = self.read('f')
