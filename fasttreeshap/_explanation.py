@@ -1,13 +1,13 @@
 
-import pandas as pd
-import numpy as np
-import scipy as sp
-import sys
-import warnings
 import copy
 import operator
+
+import numpy as np
+import pandas as pd
+import scipy as sp
 import sklearn
-from slicer import Slicer, Alias, Obj
+from slicer import Alias, Obj, Slicer
+
 # from ._order import Order
 from .utils._general import OpChain
 
@@ -530,7 +530,7 @@ class Explanation(metaclass=MetaExplanation):
             if new_self.data is not None:
                 try:
                     new_self.data = getattr(np, fname)(np.array(self.data), **kwargs)
-                except:
+                except Exception:
                     new_self.data = None
             if new_self.base_values is not None and issubclass(type(axis), int) and len(self.base_values.shape) > axis:
                 new_self.base_values = getattr(np, fname)(self.base_values, **kwargs)
@@ -753,7 +753,6 @@ def compute_output_dims(values, base_values, data, output_names):
         output_shape = tuple()
 
     interaction_order = len(values_shape) - len(data_shape) - len(output_shape)
-    values_dims = list(range(len(values_shape)))
     output_dims = range(len(data_shape) + interaction_order, len(values_shape))
     return tuple(output_dims)
 
@@ -844,7 +843,6 @@ def _auto_cohorts(shap_values, max_cohorts):
 
     # group instances by their decision paths
     paths = m.decision_path(shap_values.data).toarray()
-    unique_paths = np.unique(m.decision_path(shap_values.data).todense(), axis=0)
     path_names = []
 
     # mark each instance with a path name

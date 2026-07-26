@@ -1,8 +1,10 @@
 import queue
+
 import numpy as np
+
+from .._serializable import Deserializer, Serializer
 from ..utils import assert_import, record_import_error
 from ._masker import Masker
-from .._serializable import Serializer, Deserializer
 
 try:
     import cv2

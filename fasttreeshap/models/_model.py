@@ -1,5 +1,6 @@
 import numpy as np
-from .._serializable import Serializable, Serializer, Deserializer
+
+from .._serializable import Deserializer, Serializable, Serializer
 
 
 class Model(Serializable):

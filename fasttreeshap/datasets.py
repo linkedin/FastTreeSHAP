@@ -1,6 +1,8 @@
 import os
-import pandas as pd
+import warnings
+
 import numpy as np
+import pandas as pd
 import sklearn.datasets
 
 try:
@@ -28,9 +30,29 @@ def imagenet50(display=False, resolution=224): # pylint: disable=unused-argument
     return X, y
 
 def boston(display=False): # pylint: disable=unused-argument
-    """ Return the boston housing data in a nice package. """
+    """ Return a small tabular regression dataset in a nice package.
 
-    d = sklearn.datasets.load_boston()
+    The Boston housing dataset was removed from scikit-learn (>= 1.2) over
+    documented ethical concerns. To keep this helper working on modern
+    scikit-learn, we fall back to the diabetes regression dataset, which is a
+    drop-in, offline replacement for examples/tests that just need a small
+    tabular regression problem.
+    """
+    # modern scikit-learn (>= 1.2) raises ImportError (via module __getattr__)
+    # rather than exposing load_boston, so guard against both outcomes.
+    try:
+        d = sklearn.datasets.load_boston()
+        df = pd.DataFrame(data=d.data, columns=d.feature_names) # pylint: disable=E1101
+        return df, d.target # pylint: disable=E1101
+    except (ImportError, AttributeError):
+        pass
+
+    warnings.warn(
+        "sklearn.datasets.load_boston() was removed in scikit-learn 1.2; "
+        "fasttreeshap.datasets.boston() now returns the diabetes regression "
+        "dataset as an offline drop-in replacement."
+    )
+    d = sklearn.datasets.load_diabetes()
     df = pd.DataFrame(data=d.data, columns=d.feature_names) # pylint: disable=E1101
     return df, d.target # pylint: disable=E1101
 
@@ -114,7 +136,7 @@ def adult(display=False):
         dtype=dict(dtypes)
     )
     data = raw_data.drop(["Education"], axis=1)  # redundant with Education-Num
-    filt_dtypes = list(filter(lambda x: not (x[0] in ["Target", "Education"]), dtypes))
+    filt_dtypes = list(filter(lambda x: x[0] not in ["Target", "Education"], dtypes))
     data["Target"] = data["Target"] == " >50K"
     rcode = {
         "Not-in-family": 0,
@@ -172,7 +194,9 @@ def corrgroups60(display=False): # pylint: disable=unused-argument
         C[i,i+1] = C[i+1,i] = 0.99
         C[i,i+2] = C[i+2,i] = 0.99
         C[i+1,i+2] = C[i+2,i+1] = 0.99
-    f = lambda X: np.matmul(X, beta)
+
+    def f(X):
+        return np.matmul(X, beta)
 
     # Make sure the sample correlation is a perfect match
     X_start = np.random.randn(N, M)
@@ -208,7 +232,9 @@ def independentlinear60(display=False): # pylint: disable=unused-argument
     # set one coefficent from each group of 3 to 1
     beta = np.zeros(M)
     beta[0:30:3] = 1
-    f = lambda X: np.matmul(X, beta)
+
+    def f(X):
+        return np.matmul(X, beta)
 
     # Make sure the sample correlation is a perfect match
     X_start = np.random.randn(N, M)

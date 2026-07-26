@@ -4,15 +4,18 @@
 from __future__ import division
 
 import warnings
+
 import numpy as np
 from scipy.stats import gaussian_kde
+
 try:
     import matplotlib.pyplot as pl
 except ImportError:
     warnings.warn("matplotlib could not be loaded!")
     pass
-from ._labels import labels
 from . import colors
+from ._labels import labels
+
 
 # TODO: remove unused title argument / use title argument
 # TODO: Add support for hclustering based explanations where we sort the leaf order by magnitude and then show the dendrogram to the left
@@ -241,7 +244,7 @@ def violin(shap_values, features=None, feature_names=None, max_display=None, plo
                     colored_feature = False
                 else:
                     values = np.array(values, dtype=np.float64)  # make sure this can be numeric
-            except:
+            except Exception:
                 colored_feature = False
             N = len(shaps)
             # hspacing = (np.max(shaps) - np.min(shaps)) / 200

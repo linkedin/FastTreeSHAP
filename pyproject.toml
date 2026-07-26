@@ -1,3 +1,53 @@
 [build-system]
-requires = ["setuptools", "wheel", "oldest-supported-numpy"]
+# Build against the NumPy 2.x C-API. Extensions built against NumPy >= 2.0
+# are backward compatible at runtime with NumPy >= 1.19 as well, so a single
+# wheel works on both major series. (The old `oldest-supported-numpy` pin
+# forced a NumPy 1.x build, producing binaries that fail to load under 2.x.)
+requires = ["setuptools", "wheel", "numpy>=2.0.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.cibuildwheel]
+# Build CPython wheels for the supported Python versions. The manylinux image
+# ships gcc + libgomp, so the OpenMP build works and auditwheel bundles libgomp
+# into the wheel. Skip musllinux and non-x86_64 targets (built via QEMU, slow
+# and untested here). Each wheel is smoke-tested by importing the compiled
+# extension.
+build = "cp310-* cp311-* cp312-*"
+skip = "*-musllinux_* *_i686 *_ppc64le *_s390x *_aarch64"
+build-verbosity = 1
+test-command = 'python -c "import fasttreeshap; from fasttreeshap import _cext; print(fasttreeshap.__version__)"'
+
+[tool.ruff]
+line-length = 120  # matches the historical flake8 max-line-length
+target-version = "py38"
+extend-exclude = [
+    # vendored verbatim from scikit-image; keep byte-for-byte to ease upstream diffs
+    "fasttreeshap/plots/colors/_colorconv.py",
+    "notebooks",
+    "fasttreeshap/plots/resources",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+    # E721: several parsers intentionally dispatch on an *exact* type
+    # (`type(tree) == dict`); isinstance would also match subclasses and change
+    # which branch is taken, so these comparisons are deliberate.
+    "E721",
+    # E741: ambiguous one-letter names (l, I, O) are pervasive in the vendored
+    # numerical/plotting code; renaming them wholesale is riskier than the gain.
+    "E741",
+    # E501: long lines exist throughout the vendored code; not worth reflowing.
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# package __init__ files deliberately re-export names for the public API
+"**/__init__.py" = ["F401", "F403"]
+# test files import pytest fixtures by name (looks like an unused import/redef)
+"tests/**" = ["F401", "F811"]
+# the plotting modules are vendored from shap and carry pre-existing lint
+# issues (missing plt/scipy imports, unused locals, availability-probe imports,
+# lambda assignments) that are out of scope for this package's tree-SHAP core;
+# don't fail the lint on them rather than risk destabilising vendored code.
+"fasttreeshap/plots/**" = ["F821", "F811", "F841", "F401", "E731", "E701"]

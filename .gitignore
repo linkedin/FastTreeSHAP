@@ -17,3 +17,6 @@ catboost_info
 tests/local_scratch.py
 tests/mnist_data
 **/.coverage*
+coverage.xml
+wheelhouse/
+.venv

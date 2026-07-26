@@ -1,5 +1,7 @@
 # FastTreeSHAP
 
+[![CI](https://github.com/linkedin/FastTreeSHAP/actions/workflows/ci.yml/badge.svg)](https://github.com/linkedin/FastTreeSHAP/actions/workflows/ci.yml)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![PyPI Version](https://badge.fury.io/py/fasttreeshap.svg)](https://pypi.org/project/fasttreeshap)
 [![Downloads](https://pepy.tech/badge/fasttreeshap)](https://pepy.tech/project/fasttreeshap)
 
@@ -59,6 +61,16 @@ Installation troubleshooting:
 brew install libomp
 ```
 
+## Compatibility and Recent Fixes
+
+This build modernizes the original (unmaintained) FastTreeSHAP release. Highlights:
+
+* **NumPy 2.x support.** The package builds and runs against both NumPy 1.x (>= 1.19) and NumPy 2.x. The compiled `_cext` extension is now built against the NumPy 2.0 C-API (which stays backward compatible with 1.x at runtime), and the vendored plotting color utilities no longer call `np.obj2sctype`, which was removed in NumPy 2.0.
+* **LightGBM categorical features.** Models trained with `categorical_feature=...` use LightGBM's set-membership (`"=="`) splits rather than numeric `x <= threshold` splits. These are now handled correctly throughout the FastTreeSHAP C++ core and in every algorithm (`v0`/`v1`/`v2`), as well as the `interventional` path. The results match LightGBM's own `predict(..., pred_contrib=True)` to floating-point precision. Previously a model with categorical splits silently failed to parse and later crashed with `AttributeError: 'TreeEnsemble' object has no attribute 'num_nodes'`.
+* **Modern XGBoost.** XGBoost models are now parsed from XGBoost's version-stable JSON interfaces (`save_config()` + JSON tree dump). This fixes a `UnicodeDecodeError` when loading models trained with XGBoost >= 2.0, whose raw binary format the previous loader could not read.
+* **Multiclass LightGBM `Booster`.** A raw multiclass `lightgbm.basic.Booster` (e.g. from `lgb.train`) now correctly stacks its per-class trees instead of summing the classes into a single incorrect output. (The `LGBMClassifier` scikit-learn wrapper was already handled.)
+* **`global_path_dependent` guard.** `feature_perturbation="global_path_dependent"` now raises a clear `NotImplementedError` instead of silently returning `NaN`/incorrect SHAP values; use `"tree_path_dependent"` (no background data needed) or `"interventional"` (with a background dataset) instead.
+
 ## Usage
 
 The following screenshot shows a typical use case of FastTreeSHAP on [Census Income Data](https://archive.ics.uci.edu/ml/datasets/census+income). Note that the usage of FastTreeSHAP is exactly the same as the usage of [SHAP](https://github.com/slundberg/shap), except for four additional arguments in the class `TreeExplainer`: `algorithm`, `n_jobs`, `memory_tolerance`, and `shortcut`.
@@ -73,7 +85,7 @@ The following screenshot shows a typical use case of FastTreeSHAP on [Census Inc
 
 `memory_tolerance`: This argument specifies the upper limit of memory allocation (in GB) to run FastTreeSHAP v2. It can take values `-1` or a positive number. Its default value is `-1`, which means allocating a maximum of 0.25 * total memory of the machine to run FastTreeSHAP v2.
 
-`shortcut`: This argument determines whether to use the TreeSHAP algorithm embedded in [XGBoost](https://github.com/dmlc/xgboost), [LightGBM](https://github.com/microsoft/LightGBM), and [CatBoost](https://github.com/catboost/catboost) packages directly when computing SHAP values for XGBoost, LightGBM, and CatBoost models and when computing SHAP interaction values for XGBoost models. Its default value is `False`, which means bypassing the "shortcut" and using the code in FastTreeSHAP package directly to compute SHAP values for XGBoost, LightGBM, and CatBoost models. Note that currently `shortcut` is automaticaly set to be True for CatBoost model, as we are working on CatBoost component in FastTreeSHAP package. More details of the usage of "shortcut" can be found in the notebooks [Census Income](notebooks/FastTreeSHAP_Census_Income.ipynb), [Superconductor](notebooks/FastTreeSHAP_Superconductor.ipynb), and [Crop Mapping](notebooks/FastTreeSHAP_Crop_Mapping.ipynb).
+`shortcut`: This argument determines whether to use the TreeSHAP algorithm embedded in [XGBoost](https://github.com/dmlc/xgboost), [LightGBM](https://github.com/microsoft/LightGBM), and [CatBoost](https://github.com/catboost/catboost) packages directly when computing SHAP values for XGBoost, LightGBM, and CatBoost models and when computing SHAP interaction values for XGBoost models. Its default value is `False`, which means bypassing the "shortcut" and using the code in FastTreeSHAP package directly to compute SHAP values for XGBoost, LightGBM, and CatBoost models. Note that currently `shortcut` is automaticaly set to be True for CatBoost model, as we are working on CatBoost component in FastTreeSHAP package. LightGBM models that use categorical features are fully supported with `shortcut=False` (the FastTreeSHAP core handles categorical set-membership splits directly). More details of the usage of "shortcut" can be found in the notebooks [Census Income](notebooks/FastTreeSHAP_Census_Income.ipynb), [Superconductor](notebooks/FastTreeSHAP_Superconductor.ipynb), and [Crop Mapping](notebooks/FastTreeSHAP_Crop_Mapping.ipynb).
 
 ![FastTreeSHAP Adult Screenshot1](docs/images/fasttreeshap_adult_screenshot1.png)
 

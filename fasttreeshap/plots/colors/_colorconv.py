@@ -815,7 +815,10 @@ def convert(image, dtype, force_copy=False, uniform=False):
     #   is a subclass of that type (e.g. `np.floating` will allow
     #   `float32` and `float64` arrays through)
 
-    if np.issubdtype(dtype_in, np.obj2sctype(dtype)):
+    # np.obj2sctype was removed in NumPy 2.0; np.issubdtype accepts a
+    # dtype-like or abstract scalar type (e.g. np.floating) directly, which
+    # is exactly what obj2sctype used to normalise `dtype` into.
+    if np.issubdtype(dtype_in, dtype):
         if force_copy:
             image = image.copy()
         return image

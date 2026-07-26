@@ -1,10 +1,13 @@
 import tempfile
+
 import numpy as np
 import pytest
 import shap
 
+import fasttreeshap
 
-def basic_xgboost_scenario(max_samples=None, dataset=shap.datasets.adult):
+
+def basic_xgboost_scenario(max_samples=None, dataset=fasttreeshap.datasets.adult):
     """ Create a basic XGBoost model on a data set.
     """
     xgboost = pytest.importorskip('xgboost')

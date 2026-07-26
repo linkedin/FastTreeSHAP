@@ -1,12 +1,14 @@
-import numpy as np
-import warnings
-from . import colors
-from ..utils import ordinal_str
+import json
 import random
 import string
-import json
+
+import numpy as np
+
+from . import colors
+
 try:
-    from IPython.core.display import display as ipython_display, HTML
+    from IPython.core.display import HTML
+    from IPython.core.display import display as ipython_display
     have_ipython = True
 except ImportError:
     have_ipython = False
@@ -27,7 +29,7 @@ def text(shap_values, num_starting_labels=0, grouping_threshold=0.01, separator=
 
     num_starting_labels : int
         Number of tokens (sorted in decending order by corresponding SHAP values) that are uncovered in the initial view. When set to 0 all tokens
-        covered. 
+        covered.
 
     grouping_threshold : float
         If the component substring effects are less than a grouping_threshold fraction of an unlowered interaction effect then we
@@ -38,14 +40,14 @@ def text(shap_values, num_starting_labels=0, grouping_threshold=0.01, separator=
         The string seperator that joins tokens grouped by interation effects and unbroken string spans.
 
     xmin : float
-        Minimum shap value bound. 
+        Minimum shap value bound.
 
     xmax : float
         Maximum shap value bound.
 
     cmax : float
         Maximum absolute shap value for sample. Used for scaling colors for input tokens.
-    
+
     display: bool
         Whether to display or return html to further manipulate or embed. default: True
 
@@ -132,10 +134,10 @@ def text(shap_values, num_starting_labels=0, grouping_threshold=0.01, separator=
     document._zoom_{uuid} = undefined;
     function _output_onclick_{uuid}(i) {{
         var next_id = undefined;
-        
+
         if (document._zoom_{uuid} !== undefined) {{
             document.getElementById(document._zoom_{uuid}+ '_zoom').style.display = 'none';
-            
+
             if (document._zoom_{uuid} === '_tp_{uuid}_output_' + i) {{
                 document.getElementById(document._zoom_{uuid}).style.display = 'block';
                 document.getElementById(document._zoom_{uuid}+'_name').style.background = '#dddddd';
@@ -296,10 +298,10 @@ def text(shap_values, num_starting_labels=0, grouping_threshold=0.01, separator=
         ipython_display(HTML(out))
     else:
         return out
-        
+
 def process_shap_values(tokens, values, grouping_threshold, separator, clustering = None, return_meta_data  = False):
 
-    # See if we got hierarchical input data. If we did then we need to reprocess the 
+    # See if we got hierarchical input data. If we did then we need to reprocess the
     # shap_values and tokens to get the groups we want to display
     M = len(tokens)
     if len(values) != M:
@@ -401,7 +403,7 @@ def process_shap_values(tokens, values, grouping_threshold, separator, clusterin
         token_id_to_node_id_mapping = np.array(token_id_to_node_id_mapping)
         collapsed_node_ids = np.array(collapsed_node_ids)
 
-        M = len(tokens) 
+        M = len(tokens)
     else:
         group_sizes = np.ones(M)
         token_id_to_node_id_mapping = np.arange(M)
@@ -491,10 +493,10 @@ def svg_force_plot(values, base_values, fx, tokens, uuid, xmin, xmax, output_nam
 
         # the text label cropped and centered
         s += f'<svg x="{xpos(pos)}%" y="40" height="20" width="{xpos(last_pos) - xpos(pos)}%">'
-        s += f'  <svg x="0" y="0" width="100%" height="100%">'
+        s += '  <svg x="0" y="0" width="100%" height="100%">'
         s += f'    <text x="50%" y="9" font-size="12px" fill="rgb(255,255,255)" dominant-baseline="middle" text-anchor="middle">{tokens[ind].strip()}</text>'
-        s += f'  </svg>'
-        s += f'</svg>'
+        s += '  </svg>'
+        s += '</svg>'
 
         last_pos = pos
 
@@ -509,16 +511,16 @@ def svg_force_plot(values, base_values, fx, tokens, uuid, xmin, xmax, output_nam
                 s += f'<g transform="translate({2*j-8},0)">'
                 s += f'  <svg x="{xpos(last_pos)}%" y="40" height="18" overflow="visible" width="30">'
                 s += f'    <path d="M 0 -9 l 6 18 L 0 25" fill="none" style="stroke:rgb{red};stroke-width:2" />'
-                s += f'  </svg>'
-                s += f'</g>'
+                s += '  </svg>'
+                s += '</g>'
 
         if i + 1 != len(inds):
             for j in range(4):
                 s += f'<g transform="translate({2*j-0},0)">'
                 s += f'  <svg x="{xpos(pos)}%" y="40" height="18" overflow="visible" width="30">'
                 s += f'    <path d="M 0 -9 l 6 18 L 0 25" fill="none" style="stroke:rgb{red};stroke-width:2" />'
-                s += f'  </svg>'
-                s += f'</g>'
+                s += '  </svg>'
+                s += '</g>'
 
         last_pos = pos
 
@@ -527,11 +529,11 @@ def svg_force_plot(values, base_values, fx, tokens, uuid, xmin, xmax, output_nam
 
     # cover up a notch at the end of the red bar
     pos = fx - values[values > 0].sum()
-    s += f'<g transform="translate(-11.5,0)">'
+    s += '<g transform="translate(-11.5,0)">'
     s += f'  <svg x="{xpos(pos)}%" y="40" height="18" overflow="visible" width="30">'
-    s += f'    <path d="M 10 -9 l 6 18 L 10 25 L 0 25 L 0 -9" fill="#ffffff" style="stroke:rgb(255,255,255);stroke-width:2" />'
-    s += f'  </svg>'
-    s += f'</g>'
+    s += '    <path d="M 10 -9 l 6 18 L 10 25 L 0 25 L 0 -9" fill="#ffffff" style="stroke:rgb(255,255,255);stroke-width:2" />'
+    s += '  </svg>'
+    s += '</g>'
 
 
     # draw the light red divider lines and a rect to handle mouseover events
@@ -543,24 +545,24 @@ def svg_force_plot(values, base_values, fx, tokens, uuid, xmin, xmax, output_nam
 
         # divider line
         if i + 1 != len(inds):
-            s += f'<g transform="translate(-1.5,0)">'
+            s += '<g transform="translate(-1.5,0)">'
             s += f'  <svg x="{xpos(last_pos)}%" y="40" height="18" overflow="visible" width="30">'
             s += f'    <path d="M 0 -9 l 6 18 L 0 25" fill="none" style="stroke:rgb{light_red};stroke-width:2" />'
-            s += f'  </svg>'
-            s += f'</g>'
+            s += '  </svg>'
+            s += '</g>'
 
         # mouse over rectangle
         s += f'<rect x="{xpos(pos)}%" y="40" height="20" width="{xpos(last_pos) - xpos(pos)}%"'
-        s += f'      onmouseover="'
+        s += '      onmouseover="'
         s += f'document.getElementById(\'_tp_{uuid}_ind_{ind}\').style.textDecoration = \'underline\';'
         s += f'document.getElementById(\'_fs_{uuid}_ind_{ind}\').style.opacity = 1;'
         s += f'document.getElementById(\'_fb_{uuid}_ind_{ind}\').style.opacity = 1;'
-        s += f'"'
-        s += f'      onmouseout="'
+        s += '"'
+        s += '      onmouseout="'
         s += f'document.getElementById(\'_tp_{uuid}_ind_{ind}\').style.textDecoration = \'none\';'
         s += f'document.getElementById(\'_fs_{uuid}_ind_{ind}\').style.opacity = 0;'
         s += f'document.getElementById(\'_fb_{uuid}_ind_{ind}\').style.opacity = 0;'
-        s += f'" style="fill:rgb(0,0,0,0)" />'
+        s += '" style="fill:rgb(0,0,0,0)" />'
 
         last_pos = pos
 
@@ -590,10 +592,10 @@ def svg_force_plot(values, base_values, fx, tokens, uuid, xmin, xmax, output_nam
 
         # the text label cropped and centered
         s += f'<svg x="{xpos(last_pos)}%" y="40" height="20" width="{xpos(pos) - xpos(last_pos)}%">'
-        s += f'  <svg x="0" y="0" width="100%" height="100%">'
+        s += '  <svg x="0" y="0" width="100%" height="100%">'
         s += f'    <text x="50%" y="9" font-size="12px" fill="rgb(255,255,255)" dominant-baseline="middle" text-anchor="middle">{tokens[ind].strip()}</text>'
-        s += f'  </svg>'
-        s += f'</svg>'
+        s += '  </svg>'
+        s += '</svg>'
 
         last_pos = pos
 
@@ -608,16 +610,16 @@ def svg_force_plot(values, base_values, fx, tokens, uuid, xmin, xmax, output_nam
                 s += f'<g transform="translate({-2*j+2},0)">'
                 s += f'  <svg x="{xpos(last_pos)}%" y="40" height="18" overflow="visible" width="30">'
                 s += f'    <path d="M 8 -9 l -6 18 L 8 25" fill="none" style="stroke:rgb{blue};stroke-width:2" />'
-                s += f'  </svg>'
-                s += f'</g>'
+                s += '  </svg>'
+                s += '</g>'
 
         if i + 1 != len(inds):
             for j in range(4):
                 s += f'<g transform="translate(-{2*j+8},0)">'
                 s += f'  <svg x="{xpos(pos)}%" y="40" height="18" overflow="visible" width="30">'
                 s += f'    <path d="M 8 -9 l -6 18 L 8 25" fill="none" style="stroke:rgb{blue};stroke-width:2" />'
-                s += f'  </svg>'
-                s += f'</g>'
+                s += '  </svg>'
+                s += '</g>'
 
         last_pos = pos
 
@@ -626,11 +628,11 @@ def svg_force_plot(values, base_values, fx, tokens, uuid, xmin, xmax, output_nam
 
     # cover up a notch at the end of the blue bar
     pos = fx - values[values < 0].sum()
-    s += f'<g transform="translate(-6.0,0)">'
+    s += '<g transform="translate(-6.0,0)">'
     s += f'  <svg x="{xpos(pos)}%" y="40" height="18" overflow="visible" width="30">'
-    s += f'    <path d="M 8 -9 l -6 18 L 8 25 L 20 25 L 20 -9" fill="#ffffff" style="stroke:rgb(255,255,255);stroke-width:2" />'
-    s += f'  </svg>'
-    s += f'</g>'
+    s += '    <path d="M 8 -9 l -6 18 L 8 25 L 20 25 L 20 -9" fill="#ffffff" style="stroke:rgb(255,255,255);stroke-width:2" />'
+    s += '  </svg>'
+    s += '</g>'
 
     # draw the light blue divider lines and a rect to handle mouseover events
     pos = fx
@@ -641,24 +643,24 @@ def svg_force_plot(values, base_values, fx, tokens, uuid, xmin, xmax, output_nam
 
         # divider line
         if i + 1 != len(inds):
-            s += f'<g transform="translate(-6.0,0)">'
+            s += '<g transform="translate(-6.0,0)">'
             s += f'  <svg x="{xpos(pos)}%" y="40" height="18" overflow="visible" width="30">'
             s += f'    <path d="M 8 -9 l -6 18 L 8 25" fill="none" style="stroke:rgb{light_blue};stroke-width:2" />'
-            s += f'  </svg>'
-            s += f'</g>'
+            s += '  </svg>'
+            s += '</g>'
 
         # mouse over rectangle
         s += f'<rect x="{xpos(last_pos)}%" y="40" height="20" width="{xpos(pos) - xpos(last_pos)}%"'
-        s += f'      onmouseover="'
+        s += '      onmouseover="'
         s += f'document.getElementById(\'_tp_{uuid}_ind_{ind}\').style.textDecoration = \'underline\';'
         s += f'document.getElementById(\'_fs_{uuid}_ind_{ind}\').style.opacity = 1;'
         s += f'document.getElementById(\'_fb_{uuid}_ind_{ind}\').style.opacity = 1;'
-        s += f'"'
-        s += f'      onmouseout="'
+        s += '"'
+        s += '      onmouseout="'
         s += f'document.getElementById(\'_tp_{uuid}_ind_{ind}\').style.textDecoration = \'none\';'
         s += f'document.getElementById(\'_fs_{uuid}_ind_{ind}\').style.opacity = 0;'
         s += f'document.getElementById(\'_fb_{uuid}_ind_{ind}\').style.opacity = 0;'
-        s += f'" style="fill:rgb(0,0,0,0)" />'
+        s += '" style="fill:rgb(0,0,0,0)" />'
 
         last_pos = pos
 
@@ -674,7 +676,7 @@ def text_old(shap_values, tokens, partition_tree=None, num_starting_labels=0, gr
     SHAP value assigned to that token.
     """
 
-    # See if we got hierarchical input data. If we did then we need to reprocess the 
+    # See if we got hierarchical input data. If we did then we need to reprocess the
     # shap_values and tokens to get the groups we want to display
     M = len(tokens)
     if len(shap_values) != M:
@@ -750,7 +752,7 @@ def text_old(shap_values, tokens, partition_tree=None, num_starting_labels=0, gr
         tokens = np.array(new_tokens)
         shap_values = np.array(new_shap_values)
         group_sizes = np.array(group_sizes)
-        M = len(tokens) 
+        M = len(tokens)
     else:
         group_sizes = np.ones(M)
 
@@ -798,12 +800,12 @@ def text_old(shap_values, tokens, partition_tree=None, num_starting_labels=0, gr
              + "</div>" \
              + "</div>"
 
-    from IPython.core.display import display, HTML
+    from IPython.core.display import HTML, display
     return display(HTML(out))
 
-def text_to_text(shap_values):        
+def text_to_text(shap_values):
 
-    from IPython.core.display import display, HTML
+    from IPython.core.display import HTML, display
     # unique ID added to HTML elements and function to avoid collision of differnent instances
     uuid = ''.join(random.choices(string.ascii_lowercase, k=20))
 
@@ -821,7 +823,7 @@ def text_to_text(shap_values):
         </select>
       </div>
       <div id="{uuid}_content" style="padding:15px;border-style:solid;margin:5px;">
-          <div id = "{uuid}_saliency_plot_container" class="{uuid}_viz_container" style="display:none"> 
+          <div id = "{uuid}_saliency_plot_container" class="{uuid}_viz_container" style="display:none">
               {saliency_plot_markup}
           </div>
 
@@ -999,7 +1001,7 @@ def heatmap(shap_values):
         shap_values_list = {}
 
         for row_index in range(processed_values[col_index]['collapsed_node_ids'].shape[0]):
-            color_values[uuid+'_input_node_'+str(processed_values[col_index]['collapsed_node_ids'][row_index])+'_content'] = 'rgba' + str(get_color(processed_values[col_index]['values'][row_index],cmax)) 
+            color_values[uuid+'_input_node_'+str(processed_values[col_index]['collapsed_node_ids'][row_index])+'_content'] = 'rgba' + str(get_color(processed_values[col_index]['values'][row_index],cmax))
             shap_label_value_str = str(round(processed_values[col_index]['values'][row_index],3))
             if processed_values[col_index]['group_sizes'][row_index] > 1:
                 shap_label_value_str += ('/' + str(processed_values[col_index]['group_sizes'][row_index]))
@@ -1242,7 +1244,7 @@ def heatmap(shap_values):
                                 else {{
                                     document.getElementById(label_content_id).previousElementSibling.style.display = 'none';
                                     document.getElementById(label_content_id).parentNode.style.display = 'inline';
-                                    document.getElementById(label_content_id).style.textShadow  = "inherit"; 
+                                    document.getElementById(label_content_id).style.textShadow  = "inherit";
                                   }}
 
                             }}
@@ -1285,7 +1287,7 @@ def heatmap(shap_values):
                     document.getElementById(token).style.backgroundColor  = "transparent";
                     document.getElementById(token).previousElementSibling.style.display = 'none';
                     document.getElementById(token).parentNode.style.display = 'inline';
-                    document.getElementById(token).style.textShadow  = "inherit"; 
+                    document.getElementById(token).style.textShadow  = "inherit";
                 }}
             }}
 

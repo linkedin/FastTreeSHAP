@@ -133,13 +133,17 @@ static PyObject *_cext_dense_tree_shap(PyObject *self, PyObject *args)
     int n_jobs;
     PyObject *base_offset_obj;
     bool interactions;
-  
+    PyObject *is_categorical_obj;
+    PyObject *cat_bitset_obj;
+    int cat_num_words;
+
     /* Parse the input tuple */
     if (!PyArg_ParseTuple(
-        args, "OOOOOOOiOOOOOiOOiiiib", &children_left_obj, &children_right_obj, &children_default_obj,
+        args, "OOOOOOOiOOOOOiOOiiiibOOi", &children_left_obj, &children_right_obj, &children_default_obj,
         &features_obj, &thresholds_obj, &values_obj, &node_sample_weights_obj,
         &max_depth, &X_obj, &X_missing_obj, &y_obj, &R_obj, &R_missing_obj, &tree_limit, &base_offset_obj,
-        &out_contribs_obj, &feature_dependence, &model_output, &algorithm, &n_jobs, &interactions
+        &out_contribs_obj, &feature_dependence, &model_output, &algorithm, &n_jobs, &interactions,
+        &is_categorical_obj, &cat_bitset_obj, &cat_num_words
     )) return NULL;
 
     /* Interpret the input objects as numpy arrays. */
@@ -160,12 +164,15 @@ static PyObject *_cext_dense_tree_shap(PyObject *self, PyObject *args)
     if (R_missing_obj != Py_None) R_missing_array = (PyArrayObject*)PyArray_FROM_OTF(R_missing_obj, NPY_BOOL, NPY_ARRAY_IN_ARRAY);
     PyArrayObject *out_contribs_array = (PyArrayObject*)PyArray_FROM_OTF(out_contribs_obj, NPY_DOUBLE, NPY_ARRAY_INOUT_ARRAY);
     PyArrayObject *base_offset_array = (PyArrayObject*)PyArray_FROM_OTF(base_offset_obj, NPY_DOUBLE, NPY_ARRAY_INOUT_ARRAY);
+    PyArrayObject *is_categorical_array = (PyArrayObject*)PyArray_FROM_OTF(is_categorical_obj, NPY_INT, NPY_ARRAY_IN_ARRAY);
+    PyArrayObject *cat_bitset_array = (PyArrayObject*)PyArray_FROM_OTF(cat_bitset_obj, NPY_INT, NPY_ARRAY_IN_ARRAY);
 
     /* If that didn't work, throw an exception. Note that R and y are optional. */
     if (children_left_array == NULL || children_right_array == NULL ||
         children_default_array == NULL || features_array == NULL || thresholds_array == NULL ||
         values_array == NULL || node_sample_weights_array == NULL || X_array == NULL ||
-        X_missing_array == NULL || out_contribs_array == NULL) {
+        X_missing_array == NULL || out_contribs_array == NULL ||
+        is_categorical_array == NULL || cat_bitset_array == NULL) {
         Py_XDECREF(children_left_array);
         Py_XDECREF(children_right_array);
         Py_XDECREF(children_default_array);
@@ -181,6 +188,8 @@ static PyObject *_cext_dense_tree_shap(PyObject *self, PyObject *args)
         //PyArray_ResolveWritebackIfCopy(out_contribs_array);
         Py_XDECREF(out_contribs_array);
         Py_XDECREF(base_offset_array);
+        Py_XDECREF(is_categorical_array);
+        Py_XDECREF(cat_bitset_array);
         return NULL;
     }
 
@@ -209,6 +218,8 @@ static PyObject *_cext_dense_tree_shap(PyObject *self, PyObject *args)
     if (R_missing_array != NULL) R_missing = (bool*)PyArray_DATA(R_missing_array);
     tfloat *out_contribs = (tfloat*)PyArray_DATA(out_contribs_array);
     tfloat *base_offset = (tfloat*)PyArray_DATA(base_offset_array);
+    int *is_categorical = (int*)PyArray_DATA(is_categorical_array);
+    int *cat_bitset = (int*)PyArray_DATA(cat_bitset_array);
 
     // these are just a wrapper objects for all the pointers and numbers associated with
     // the ensemble tree model and the datset we are explaing
@@ -217,6 +228,9 @@ static PyObject *_cext_dense_tree_shap(PyObject *self, PyObject *args)
         node_sample_weights, max_depth, tree_limit, base_offset,
         max_nodes, num_outputs
     );
+    trees.is_categorical = is_categorical;
+    trees.cat_bitset = cat_bitset;
+    trees.cat_num_words = (unsigned)cat_num_words;
     ExplanationDataset data = ExplanationDataset(X, X_missing, y, R, R_missing, num_X, M, num_R);
 
     dense_tree_shap(trees, data, out_contribs, feature_dependence, model_output, algorithm, n_jobs, interactions);
@@ -240,6 +254,8 @@ static PyObject *_cext_dense_tree_shap(PyObject *self, PyObject *args)
     //PyArray_ResolveWritebackIfCopy(out_contribs_array);
     Py_XDECREF(out_contribs_array);
     Py_XDECREF(base_offset_array);
+    Py_XDECREF(is_categorical_array);
+    Py_XDECREF(cat_bitset_array);
 
     /* Build the output tuple */
     PyObject *ret = Py_BuildValue("d", ret_value);
@@ -263,12 +279,16 @@ static PyObject *_cext_dense_tree_predict(PyObject *self, PyObject *args)
     PyObject *X_missing_obj;
     PyObject *y_obj;
     PyObject *out_pred_obj;
-  
+    PyObject *is_categorical_obj;
+    PyObject *cat_bitset_obj;
+    int cat_num_words;
+
     /* Parse the input tuple */
     if (!PyArg_ParseTuple(
-        args, "OOOOOOiiOiOOOO", &children_left_obj, &children_right_obj, &children_default_obj,
+        args, "OOOOOOiiOiOOOOOOi", &children_left_obj, &children_right_obj, &children_default_obj,
         &features_obj, &thresholds_obj, &values_obj, &max_depth, &tree_limit, &base_offset_obj, &model_output,
-        &X_obj, &X_missing_obj, &y_obj, &out_pred_obj
+        &X_obj, &X_missing_obj, &y_obj, &out_pred_obj,
+        &is_categorical_obj, &cat_bitset_obj, &cat_num_words
     )) return NULL;
 
     /* Interpret the input objects as numpy arrays. */
@@ -284,12 +304,15 @@ static PyObject *_cext_dense_tree_predict(PyObject *self, PyObject *args)
     PyArrayObject *y_array = NULL;
     if (y_obj != Py_None) y_array = (PyArrayObject*)PyArray_FROM_OTF(y_obj, NPY_DOUBLE, NPY_ARRAY_IN_ARRAY);
     PyArrayObject *out_pred_array = (PyArrayObject*)PyArray_FROM_OTF(out_pred_obj, NPY_DOUBLE, NPY_ARRAY_INOUT_ARRAY);
+    PyArrayObject *is_categorical_array = (PyArrayObject*)PyArray_FROM_OTF(is_categorical_obj, NPY_INT, NPY_ARRAY_IN_ARRAY);
+    PyArrayObject *cat_bitset_array = (PyArrayObject*)PyArray_FROM_OTF(cat_bitset_obj, NPY_INT, NPY_ARRAY_IN_ARRAY);
 
     /* If that didn't work, throw an exception. Note that R and y are optional. */
     if (children_left_array == NULL || children_right_array == NULL ||
         children_default_array == NULL || features_array == NULL || thresholds_array == NULL ||
         values_array == NULL || X_array == NULL ||
-        X_missing_array == NULL || out_pred_array == NULL) {
+        X_missing_array == NULL || out_pred_array == NULL ||
+        is_categorical_array == NULL || cat_bitset_array == NULL) {
         Py_XDECREF(children_left_array);
         Py_XDECREF(children_right_array);
         Py_XDECREF(children_default_array);
@@ -302,6 +325,8 @@ static PyObject *_cext_dense_tree_predict(PyObject *self, PyObject *args)
         if (y_array != NULL) Py_XDECREF(y_array);
         //PyArray_ResolveWritebackIfCopy(out_pred_array);
         Py_XDECREF(out_pred_array);
+        Py_XDECREF(is_categorical_array);
+        Py_XDECREF(cat_bitset_array);
         return NULL;
     }
 
@@ -329,6 +354,8 @@ static PyObject *_cext_dense_tree_predict(PyObject *self, PyObject *args)
     tfloat *y = NULL;
     if (y_array != NULL) y = (tfloat*)PyArray_DATA(y_array);
     tfloat *out_pred = (tfloat*)PyArray_DATA(out_pred_array);
+    int *is_categorical = (int*)PyArray_DATA(is_categorical_array);
+    int *cat_bitset = (int*)PyArray_DATA(cat_bitset_array);
 
     // these are just wrapper objects for all the pointers and numbers associated with
     // the ensemble tree model and the datset we are explaing
@@ -337,6 +364,9 @@ static PyObject *_cext_dense_tree_predict(PyObject *self, PyObject *args)
         NULL, max_depth, tree_limit, base_offset,
         max_nodes, num_outputs
     );
+    trees.is_categorical = is_categorical;
+    trees.cat_bitset = cat_bitset;
+    trees.cat_num_words = (unsigned)cat_num_words;
     ExplanationDataset data = ExplanationDataset(X, X_missing, y, NULL, NULL, num_X, M, 0);
 
     dense_tree_predict(out_pred, trees, data, model_output);
@@ -354,6 +384,8 @@ static PyObject *_cext_dense_tree_predict(PyObject *self, PyObject *args)
     if (y_array != NULL) Py_XDECREF(y_array);
     //PyArray_ResolveWritebackIfCopy(out_pred_array);
     Py_XDECREF(out_pred_array);
+    Py_XDECREF(is_categorical_array);
+    Py_XDECREF(cat_bitset_array);
 
     /* Build the output tuple */
     PyObject *ret = Py_BuildValue("d", (double)values[0]);
@@ -373,11 +405,15 @@ static PyObject *_cext_dense_tree_update_weights(PyObject *self, PyObject *args)
     PyObject *node_sample_weight_obj;
     PyObject *X_obj;
     PyObject *X_missing_obj;
-  
+    PyObject *is_categorical_obj;
+    PyObject *cat_bitset_obj;
+    int cat_num_words;
+
     /* Parse the input tuple */
     if (!PyArg_ParseTuple(
-        args, "OOOOOOiOOO", &children_left_obj, &children_right_obj, &children_default_obj,
-        &features_obj, &thresholds_obj, &values_obj, &tree_limit, &node_sample_weight_obj, &X_obj, &X_missing_obj
+        args, "OOOOOOiOOOOOi", &children_left_obj, &children_right_obj, &children_default_obj,
+        &features_obj, &thresholds_obj, &values_obj, &tree_limit, &node_sample_weight_obj, &X_obj, &X_missing_obj,
+        &is_categorical_obj, &cat_bitset_obj, &cat_num_words
     )) return NULL;
 
     /* Interpret the input objects as numpy arrays. */
@@ -390,12 +426,14 @@ static PyObject *_cext_dense_tree_update_weights(PyObject *self, PyObject *args)
     PyArrayObject *node_sample_weight_array = (PyArrayObject*)PyArray_FROM_OTF(node_sample_weight_obj, NPY_DOUBLE, NPY_ARRAY_INOUT_ARRAY);
     PyArrayObject *X_array = (PyArrayObject*)PyArray_FROM_OTF(X_obj, NPY_DOUBLE, NPY_ARRAY_IN_ARRAY);
     PyArrayObject *X_missing_array = (PyArrayObject*)PyArray_FROM_OTF(X_missing_obj, NPY_BOOL, NPY_ARRAY_IN_ARRAY);
+    PyArrayObject *is_categorical_array = (PyArrayObject*)PyArray_FROM_OTF(is_categorical_obj, NPY_INT, NPY_ARRAY_IN_ARRAY);
+    PyArrayObject *cat_bitset_array = (PyArrayObject*)PyArray_FROM_OTF(cat_bitset_obj, NPY_INT, NPY_ARRAY_IN_ARRAY);
 
     /* If that didn't work, throw an exception. */
     if (children_left_array == NULL || children_right_array == NULL ||
         children_default_array == NULL || features_array == NULL || thresholds_array == NULL ||
         values_array == NULL || node_sample_weight_array == NULL || X_array == NULL ||
-        X_missing_array == NULL) {
+        X_missing_array == NULL || is_categorical_array == NULL || cat_bitset_array == NULL) {
         Py_XDECREF(children_left_array);
         Py_XDECREF(children_right_array);
         Py_XDECREF(children_default_array);
@@ -406,6 +444,8 @@ static PyObject *_cext_dense_tree_update_weights(PyObject *self, PyObject *args)
         Py_XDECREF(node_sample_weight_array);
         Py_XDECREF(X_array);
         Py_XDECREF(X_missing_array);
+        Py_XDECREF(is_categorical_array);
+        Py_XDECREF(cat_bitset_array);
         std::cerr << "Found a NULL input array in _cext_dense_tree_update_weights!\n";
         return NULL;
     }
@@ -424,6 +464,8 @@ static PyObject *_cext_dense_tree_update_weights(PyObject *self, PyObject *args)
     tfloat *node_sample_weight = (tfloat*)PyArray_DATA(node_sample_weight_array);
     tfloat *X = (tfloat*)PyArray_DATA(X_array);
     bool *X_missing = (bool*)PyArray_DATA(X_missing_array);
+    int *is_categorical = (int*)PyArray_DATA(is_categorical_array);
+    int *cat_bitset = (int*)PyArray_DATA(cat_bitset_array);
 
     // these are just wrapper objects for all the pointers and numbers associated with
     // the ensemble tree model and the datset we are explaing
@@ -431,6 +473,9 @@ static PyObject *_cext_dense_tree_update_weights(PyObject *self, PyObject *args)
         children_left, children_right, children_default, features, thresholds, values,
         node_sample_weight, 0, tree_limit, 0, max_nodes, 0
     );
+    trees.is_categorical = is_categorical;
+    trees.cat_bitset = cat_bitset;
+    trees.cat_num_words = (unsigned)cat_num_words;
     ExplanationDataset data = ExplanationDataset(X, X_missing, NULL, NULL, NULL, num_X, M, 0);
 
     dense_tree_update_weights(trees, data);
@@ -446,6 +491,8 @@ static PyObject *_cext_dense_tree_update_weights(PyObject *self, PyObject *args)
     Py_XDECREF(node_sample_weight_array);
     Py_XDECREF(X_array);
     Py_XDECREF(X_missing_array);
+    Py_XDECREF(is_categorical_array);
+    Py_XDECREF(cat_bitset_array);
 
     /* Build the output tuple */
     PyObject *ret = Py_BuildValue("d", 1);
@@ -469,13 +516,16 @@ static PyObject *_cext_dense_tree_saabas(PyObject *self, PyObject *args)
     PyObject *X_missing_obj;
     PyObject *y_obj;
     PyObject *out_pred_obj;
-    
-  
+    PyObject *is_categorical_obj;
+    PyObject *cat_bitset_obj;
+    int cat_num_words;
+
     /* Parse the input tuple */
     if (!PyArg_ParseTuple(
-        args, "OOOOOOiiOiOOOO", &children_left_obj, &children_right_obj, &children_default_obj,
+        args, "OOOOOOiiOiOOOOOOi", &children_left_obj, &children_right_obj, &children_default_obj,
         &features_obj, &thresholds_obj, &values_obj, &max_depth, &tree_limit, &base_offset_obj, &model_output,
-        &X_obj, &X_missing_obj, &y_obj, &out_pred_obj
+        &X_obj, &X_missing_obj, &y_obj, &out_pred_obj,
+        &is_categorical_obj, &cat_bitset_obj, &cat_num_words
     )) return NULL;
 
     /* Interpret the input objects as numpy arrays. */
@@ -491,12 +541,15 @@ static PyObject *_cext_dense_tree_saabas(PyObject *self, PyObject *args)
     PyArrayObject *y_array = NULL;
     if (y_obj != Py_None) y_array = (PyArrayObject*)PyArray_FROM_OTF(y_obj, NPY_DOUBLE, NPY_ARRAY_IN_ARRAY);
     PyArrayObject *out_pred_array = (PyArrayObject*)PyArray_FROM_OTF(out_pred_obj, NPY_DOUBLE, NPY_ARRAY_IN_ARRAY);
+    PyArrayObject *is_categorical_array = (PyArrayObject*)PyArray_FROM_OTF(is_categorical_obj, NPY_INT, NPY_ARRAY_IN_ARRAY);
+    PyArrayObject *cat_bitset_array = (PyArrayObject*)PyArray_FROM_OTF(cat_bitset_obj, NPY_INT, NPY_ARRAY_IN_ARRAY);
 
     /* If that didn't work, throw an exception. Note that R and y are optional. */
     if (children_left_array == NULL || children_right_array == NULL ||
         children_default_array == NULL || features_array == NULL || thresholds_array == NULL ||
         values_array == NULL || X_array == NULL ||
-        X_missing_array == NULL || out_pred_array == NULL) {
+        X_missing_array == NULL || out_pred_array == NULL ||
+        is_categorical_array == NULL || cat_bitset_array == NULL) {
         Py_XDECREF(children_left_array);
         Py_XDECREF(children_right_array);
         Py_XDECREF(children_default_array);
@@ -509,6 +562,8 @@ static PyObject *_cext_dense_tree_saabas(PyObject *self, PyObject *args)
         if (y_array != NULL) Py_XDECREF(y_array);
         //PyArray_ResolveWritebackIfCopy(out_pred_array);
         Py_XDECREF(out_pred_array);
+        Py_XDECREF(is_categorical_array);
+        Py_XDECREF(cat_bitset_array);
         return NULL;
     }
 
@@ -530,6 +585,8 @@ static PyObject *_cext_dense_tree_saabas(PyObject *self, PyObject *args)
     tfloat *y = NULL;
     if (y_array != NULL) y = (tfloat*)PyArray_DATA(y_array);
     tfloat *out_pred = (tfloat*)PyArray_DATA(out_pred_array);
+    int *is_categorical = (int*)PyArray_DATA(is_categorical_array);
+    int *cat_bitset = (int*)PyArray_DATA(cat_bitset_array);
 
     // these are just wrapper objects for all the pointers and numbers associated with
     // the ensemble tree model and the datset we are explaing
@@ -538,6 +595,9 @@ static PyObject *_cext_dense_tree_saabas(PyObject *self, PyObject *args)
         NULL, max_depth, tree_limit, base_offset,
         max_nodes, num_outputs
     );
+    trees.is_categorical = is_categorical;
+    trees.cat_bitset = cat_bitset;
+    trees.cat_num_words = (unsigned)cat_num_words;
     ExplanationDataset data = ExplanationDataset(X, X_missing, y, NULL, NULL, num_X, M, 0);
 
     dense_tree_saabas(out_pred, trees, data);
@@ -555,6 +615,8 @@ static PyObject *_cext_dense_tree_saabas(PyObject *self, PyObject *args)
     if (y_array != NULL) Py_XDECREF(y_array);
     //PyArray_ResolveWritebackIfCopy(out_pred_array);
     Py_XDECREF(out_pred_array);
+    Py_XDECREF(is_categorical_array);
+    Py_XDECREF(cat_bitset_array);
 
     /* Build the output tuple */
     PyObject *ret = Py_BuildValue("d", (double)values[0]);

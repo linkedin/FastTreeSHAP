@@ -1,1 +1,12 @@
-graft fasttreeshap/tree_shap.h
+# Ship the C++ extension sources so the sdist can be built from source.
+# (The compiled extension is built from fasttreeshap/cext/_cext.cc, which
+# #includes tree_shap.h -- both must be present in the sdist.)
+graft fasttreeshap/cext
+
+# Non-Python package data needed at runtime (plot resources).
+recursive-include fasttreeshap/plots/resources *
+
+include LICENSE
+include NOTICE
+include README.md
+include requirements.txt

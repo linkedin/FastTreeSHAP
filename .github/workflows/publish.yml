@@ -1,0 +1,71 @@
+name: Publish to PyPI
+
+# Publishes to PyPI when a GitHub Release is published. Uses PyPI Trusted
+# Publishing (OIDC) -- no API token/password is stored in the repo. Before the
+# first release, configure the trusted publisher on PyPI:
+#   https://docs.pypi.org/trusted-publishers/  (owner=linkedin, repo=FastTreeSHAP,
+#   workflow=publish.yml, environment=pypi)
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-sdist:
+    name: Build sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build source distribution
+        run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: dist/*.tar.gz
+
+  build-wheels:
+    name: Build wheels (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux manylinux wheels only. The manylinux images ship gcc + libgomp,
+        # so the OpenMP build "just works" and auditwheel bundles libgomp into
+        # the wheel. macOS/Windows users install from the sdist (build from
+        # source); adding those wheels needs libomp handling for delocate and is
+        # left as a follow-up.
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v4.1.0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  publish:
+    name: Publish to PyPI
+    needs: [build-sdist, build-wheels]
+    runs-on: ubuntu-latest
+    # Trusted Publishing: this job trades its OIDC identity for a short-lived
+    # PyPI token. It must be a top-level job (not reusable) with id-token:write.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/fasttreeshap
+    permissions:
+      id-token: write
+    steps:
+      - name: Download all distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

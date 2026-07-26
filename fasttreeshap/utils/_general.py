@@ -1,16 +1,13 @@
+import copy
+import os
 import re
-import pandas as pd
-import numpy as np
-import scipy as sp
-from scipy.spatial.distance import pdist
 import sys
 import warnings
-import sklearn
-import importlib
-import copy
 from contextlib import contextmanager
-import sys, os
 
+import numpy as np
+import scipy as sp
+import sklearn
 
 if (sys.version_info < (3, 0)):
     warnings.warn("As of version 0.29.0 shap only supports Python 3 (not 2)!")
@@ -46,7 +43,7 @@ def convert_name(ind, shap_values, input_names):
 
             # we allow the sum of all the SHAP values to be specified with "sum()"
             # assuming here that the calling method can deal with this case
-            elif ind == "sum()": 
+            elif ind == "sum()":
                 return "sum()"
             else:
                 raise ValueError("Could not find feature named: " + ind)
@@ -62,10 +59,9 @@ def potential_interactions(shap_values_column, shap_values_matrix):
     index values for SHAP see the interaction_contribs option implemented in XGBoost.
     """
 
-    # ignore inds that are identical to the column 
+    # ignore inds that are identical to the column
     ignore_inds = np.where((shap_values_matrix.values.T - shap_values_column.values).T.std(0) < 1e-8)
-    
-    values = shap_values_matrix.values
+
     X = shap_values_matrix.data
 
     if X.shape[0] > 10000:
@@ -196,7 +192,7 @@ def safe_isinstance(obj, class_path_str):
         class_path_strs = class_path_str
     else:
         class_path_strs = ['']
-    
+
     # try each module path in order
     for class_path_str in class_path_strs:
         if "." not in class_path_str:
@@ -213,13 +209,13 @@ def safe_isinstance(obj, class_path_str):
             continue
 
         module = sys.modules[module_name]
-        
+
         #Get class
         _class = getattr(module, class_name, None)
-        
+
         if _class is None:
             continue
-        
+
         if isinstance(obj, _class):
             return True
 
@@ -239,7 +235,7 @@ def format_value(s, format_str):
 
 # From: https://groups.google.com/forum/m/#!topic/openrefine/G7_PSdUeno0
 def ordinal_str(n):
-    """ Converts a number to and ordinal string. 
+    """ Converts a number to and ordinal string.
     """
     return str(n) + {1: 'st', 2: 'nd', 3: 'rd'}.get(4 if 10 <= n % 100 < 20 else n % 10, "th")
 
@@ -250,7 +246,7 @@ class OpChain():
     def __init__(self, root_name=""):
         self._ops = []
         self._root_name = root_name
-    
+
     def apply(self, obj):
         """ Applies all our ops to the given object.
         """
@@ -270,7 +266,7 @@ class OpChain():
         new_self._ops[-1][1] = args
         new_self._ops[-1][2] = kwargs
         return new_self
-        
+
     def __getitem__(self, item):
         new_self = OpChain(self._root_name)
         new_self._ops = copy.copy(self._ops)

@@ -1,17 +1,15 @@
 import copy
 import time
+
 import numpy as np
 import scipy as sp
-from .. import maskers
-from .. import links
-from ..utils import safe_isinstance, show_progress
-from ..models import Model
-from ..maskers import Masker
-from .._explanation import Explanation
-from .._serializable import Serializable
-from .. import explainers
-from .._serializable import Serializer, Deserializer
 
+from .. import explainers, links, maskers
+from .._explanation import Explanation
+from .._serializable import Deserializer, Serializable, Serializer
+from ..maskers import Masker
+from ..models import Model
+from ..utils import safe_isinstance, show_progress
 
 
 class Explainer(Serializable):
@@ -274,7 +272,7 @@ class Explainer(Serializable):
             are fixed inputs present, like labels when explaining the loss), and row_mask_shapes is a list
             of all the input shapes (since the row_values is always flattened),
         """
-        
+
         return {}
 
     @staticmethod

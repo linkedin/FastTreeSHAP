@@ -54,6 +54,17 @@ struct TreeEnsemble {
     unsigned max_nodes;
     unsigned num_outputs;
 
+    // Support for categorical (set-membership) splits, e.g. LightGBM's "==" nodes.
+    // `is_categorical[node]` is non-zero when the node tests set membership rather
+    // than `x <= threshold`. The membership set is stored as a bitset: node `n`
+    // owns `cat_num_words` consecutive 32-bit words starting at
+    // `cat_bitset + n * cat_num_words`, and category `c` follows the LEFT child
+    // when bit `c` is set. These default to NULL/0 for models with no categorical
+    // splits, in which case behaviour is identical to the numeric-only version.
+    int *is_categorical = NULL;
+    int *cat_bitset = NULL;
+    unsigned cat_num_words = 0;
+
     TreeEnsemble() {}
     TreeEnsemble(int *children_left, int *children_right, int *children_default, int *features,
                  tfloat *thresholds, tfloat *values, tfloat *node_sample_weights,
@@ -80,12 +91,17 @@ struct TreeEnsemble {
         tree.base_offset = base_offset;
         tree.max_nodes = max_nodes;
         tree.num_outputs = num_outputs;
+        tree.cat_num_words = cat_num_words;
+        tree.is_categorical = (is_categorical == NULL) ? NULL : is_categorical + d;
+        tree.cat_bitset = (cat_bitset == NULL) ? NULL : cat_bitset + d * cat_num_words;
     }
 
     bool is_leaf(unsigned pos)const {
         return children_left[pos] < 0;
     }
 
+    // NOTE: cat_num_words must be set before allocate() if categorical splits
+    // are to be carried into this (e.g. merged) tree.
     void allocate(unsigned tree_limit_in, unsigned max_nodes_in, unsigned num_outputs_in) {
         tree_limit = tree_limit_in;
         max_nodes = max_nodes_in;
@@ -97,6 +113,11 @@ struct TreeEnsemble {
         thresholds = new tfloat[tree_limit * max_nodes];
         values = new tfloat[tree_limit * max_nodes * num_outputs];
         node_sample_weights = new tfloat[tree_limit * max_nodes];
+        // zero-initialise so nodes are numeric unless explicitly marked categorical
+        is_categorical = new int[tree_limit * max_nodes]();
+        if (cat_num_words > 0) {
+            cat_bitset = new int[tree_limit * max_nodes * cat_num_words]();
+        }
     }
 
     void free() {
@@ -107,8 +128,31 @@ struct TreeEnsemble {
         delete[] thresholds;
         delete[] values;
         delete[] node_sample_weights;
+        delete[] is_categorical;
+        delete[] cat_bitset;
     }
 };
+
+// Decide whether instance value `xval` follows the LEFT child at an internal node.
+// Handles both numeric splits (x <= threshold) and LightGBM-style categorical
+// set-membership splits (x is one of the node's stored categories).
+// Callers must resolve the missing-value (default child) case *before* calling
+// this helper; it only decides left-vs-right for values that are present.
+inline bool follows_left(unsigned node_index, tfloat xval, const tfloat *thresholds,
+                         const int *is_categorical, const int *cat_bitset,
+                         unsigned cat_num_words) {
+    if (is_categorical != NULL && is_categorical[node_index]) {
+        // categories are non-negative integers; any value outside the stored set
+        // (negative, non-integer or out of range) follows the right child, which
+        // matches LightGBM's own decision function.
+        if (xval < 0) return false;
+        const unsigned c = static_cast<unsigned>(xval);
+        const unsigned word = c >> 5;
+        if (word >= cat_num_words) return false;
+        return (static_cast<unsigned>(cat_bitset[node_index * cat_num_words + word]) >> (c & 31u)) & 1u;
+    }
+    return xval <= thresholds[node_index];
+}
 
 struct ExplanationDataset {
     tfloat *X;
@@ -200,7 +244,8 @@ inline tfloat *tree_predict(unsigned i, const TreeEnsemble &trees, const tfloat 
         // otherwise we are at an internal node and need to recurse
         if (x_missing[feature]) {
             node = trees.children_default[pos];
-        } else if (x[feature] <= trees.thresholds[pos]) {
+        } else if (follows_left(pos, x[feature], trees.thresholds, trees.is_categorical,
+                                trees.cat_bitset, trees.cat_num_words)) {
             node = trees.children_left[pos];
         } else {
             node = trees.children_right[pos];
@@ -216,7 +261,7 @@ inline void dense_tree_predict(tfloat *out, const TreeEnsemble &trees, const Exp
     // see what transform (if any) we have
     transform_f transform = get_transform(model_transform);
 
-    for (unsigned i = 0; i < data.num_X; ++i) {
+    for (int i = 0; i < static_cast<int>(data.num_X); ++i) {
 
         // add the base offset
         for (unsigned k = 0; k < trees.num_outputs; ++k) {
@@ -224,7 +269,7 @@ inline void dense_tree_predict(tfloat *out, const TreeEnsemble &trees, const Exp
         }
 
         // add the leaf values from each tree
-        for (unsigned j = 0; j < trees.tree_limit; ++j) {
+        for (int j = 0; j < static_cast<int>(trees.tree_limit); ++j) {
             const tfloat *leaf_value = tree_predict(j, trees, x, x_missing);
 
             for (unsigned k = 0; k < trees.num_outputs; ++k) {
@@ -258,11 +303,12 @@ inline void tree_update_weights(unsigned i, TreeEnsemble &trees, const tfloat *x
         
         // we hit a leaf so return a pointer to the values
         if (trees.children_left[pos] < 0) break;
-        
+
         // otherwise we are at an internal node and need to recurse
         if (x_missing[feature]) {
             node = trees.children_default[pos];
-        } else if (x[feature] <= trees.thresholds[pos]) {
+        } else if (follows_left(pos, x[feature], trees.thresholds, trees.is_categorical,
+                                trees.cat_bitset, trees.cat_num_words)) {
             node = trees.children_left[pos];
         } else {
             node = trees.children_right[pos];
@@ -274,10 +320,10 @@ inline void dense_tree_update_weights(TreeEnsemble &trees, const ExplanationData
     const tfloat *x = data.X;
     const bool *x_missing = data.X_missing;
 
-    for (unsigned i = 0; i < data.num_X; ++i) {
+    for (int i = 0; i < static_cast<int>(data.num_X); ++i) {
 
         // add the leaf values from each tree
-        for (unsigned j = 0; j < trees.tree_limit; ++j) {
+        for (int j = 0; j < static_cast<int>(trees.tree_limit); ++j) {
             tree_update_weights(j, trees, x, x_missing);
         }
 
@@ -298,7 +344,8 @@ inline void tree_saabas(tfloat *out, const TreeEnsemble &tree, const Explanation
         const unsigned feature = tree.features[curr_node];
         if (data.X_missing[feature]) {
             next_node = tree.children_default[curr_node];
-        } else if (data.X[feature] <= tree.thresholds[curr_node]) {
+        } else if (follows_left(curr_node, data.X[feature], tree.thresholds, tree.is_categorical,
+                                tree.cat_bitset, tree.cat_num_words)) {
             next_node = tree.children_left[curr_node];
         } else {
             next_node = tree.children_right[curr_node];
@@ -322,13 +369,13 @@ inline void dense_tree_saabas(tfloat *out_contribs, const TreeEnsemble& trees, c
     ExplanationDataset instance;
 
     // build explanation for each sample
-    for (unsigned i = 0; i < data.num_X; ++i) {
+    for (int i = 0; i < static_cast<int>(data.num_X); ++i) {
         instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
         data.get_x_instance(instance, i);
 
         // aggregate the effect of explaining each tree
         // (this works because of the linearity property of Shapley values)
-        for (unsigned j = 0; j < trees.tree_limit; ++j) {
+        for (int j = 0; j < static_cast<int>(trees.tree_limit); ++j) {
             trees.get_tree(tree, j);
             tree_saabas(instance_out_contribs, tree, instance);
         }
@@ -411,6 +458,8 @@ inline void tree_shap_recursive(const unsigned num_outputs, const int *children_
                                 const int *children_default, const int *features,
                                 const tfloat *thresholds, const tfloat *values,
                                 const tfloat *node_sample_weight,
+                                const int *is_categorical, const int *cat_bitset,
+                                unsigned cat_num_words,
                                 const tfloat *x, const bool *x_missing, tfloat *phi,
                                 unsigned node_index, unsigned unique_depth,
                                 PathElement *parent_unique_path, tfloat parent_zero_fraction,
@@ -450,7 +499,8 @@ inline void tree_shap_recursive(const unsigned num_outputs, const int *children_
         unsigned hot_index = 0;
         if (x_missing[split_index]) {
             hot_index = children_default[node_index];
-        } else if (x[split_index] <= thresholds[node_index]) {
+        } else if (follows_left(node_index, x[split_index], thresholds, is_categorical,
+                                cat_bitset, cat_num_words)) {
             hot_index = children_left[node_index];
         } else {
             hot_index = children_right[node_index];
@@ -490,14 +540,16 @@ inline void tree_shap_recursive(const unsigned num_outputs, const int *children_
 
         tree_shap_recursive(
             num_outputs, children_left, children_right, children_default, features, thresholds, values,
-            node_sample_weight, x, x_missing, phi, hot_index, unique_depth + 1, unique_path,
+            node_sample_weight, is_categorical, cat_bitset, cat_num_words, x, x_missing, phi,
+            hot_index, unique_depth + 1, unique_path,
             hot_zero_fraction * incoming_zero_fraction, incoming_one_fraction,
             split_index, condition, condition_feature, hot_condition_fraction
         );
 
         tree_shap_recursive(
             num_outputs, children_left, children_right, children_default, features, thresholds, values,
-            node_sample_weight, x, x_missing, phi, cold_index, unique_depth + 1, unique_path,
+            node_sample_weight, is_categorical, cat_bitset, cat_num_words, x, x_missing, phi,
+            cold_index, unique_depth + 1, unique_path,
             cold_zero_fraction * incoming_zero_fraction, 0,
             split_index, condition, condition_feature, cold_condition_fraction
         );
@@ -549,7 +601,8 @@ inline void tree_shap(const TreeEnsemble& tree, const ExplanationDataset &data,
 
     tree_shap_recursive(
         tree.num_outputs, tree.children_left, tree.children_right, tree.children_default,
-        tree.features, tree.thresholds, tree.values, tree.node_sample_weights, data.X,
+        tree.features, tree.thresholds, tree.values, tree.node_sample_weights,
+        tree.is_categorical, tree.cat_bitset, tree.cat_num_words, data.X,
         data.X_missing, out_contribs, 0, 0, unique_path_data, 1, 1, -1, condition,
         condition_feature, 1
     );
@@ -642,6 +695,8 @@ inline void tree_shap_recursive_v1(const unsigned num_outputs, const int *childr
                                    const int *children_default, const int *features,
                                    const tfloat *thresholds, const tfloat *values,
                                    const tfloat *node_sample_weight,
+                                   const int *is_categorical, const int *cat_bitset,
+                                   unsigned cat_num_words,
                                    const tfloat *x, const bool *x_missing, tfloat *phi,
                                    unsigned node_index, unsigned unique_depth, unsigned unique_depth_pweights,
                                    PathElement *parent_unique_path, tfloat *parent_pweights,
@@ -710,7 +765,8 @@ inline void tree_shap_recursive_v1(const unsigned num_outputs, const int *childr
         unsigned hot_index = 0;
         if (x_missing[split_index]) {
             hot_index = children_default[node_index];
-        } else if (x[split_index] <= thresholds[node_index]) {
+        } else if (follows_left(node_index, x[split_index], thresholds, is_categorical,
+                                cat_bitset, cat_num_words)) {
             hot_index = children_left[node_index];
         } else {
             hot_index = children_right[node_index];
@@ -758,7 +814,8 @@ inline void tree_shap_recursive_v1(const unsigned num_outputs, const int *childr
 
         tree_shap_recursive_v1(
             num_outputs, children_left, children_right, children_default, features, thresholds, values,
-            node_sample_weight, x, x_missing, phi, hot_index, unique_depth + 1, unique_depth_pweights + 1,
+            node_sample_weight, is_categorical, cat_bitset, cat_num_words, x, x_missing, phi,
+            hot_index, unique_depth + 1, unique_depth_pweights + 1,
             unique_path, pweights, pweights_residual,
             hot_zero_fraction * incoming_zero_fraction, incoming_one_fraction,
             split_index, condition, condition_feature, hot_condition_fraction
@@ -766,7 +823,8 @@ inline void tree_shap_recursive_v1(const unsigned num_outputs, const int *childr
 
         tree_shap_recursive_v1(
             num_outputs, children_left, children_right, children_default, features, thresholds, values,
-            node_sample_weight, x, x_missing, phi, cold_index, unique_depth + 1, unique_depth_pweights + 1,
+            node_sample_weight, is_categorical, cat_bitset, cat_num_words, x, x_missing, phi,
+            cold_index, unique_depth + 1, unique_depth_pweights + 1,
             unique_path, pweights, pweights_residual,
             cold_zero_fraction * incoming_zero_fraction, 0,
             split_index, condition, condition_feature, cold_condition_fraction
@@ -792,7 +850,8 @@ inline void tree_shap_v1(const TreeEnsemble& tree, const ExplanationDataset &dat
 
     tree_shap_recursive_v1(
         tree.num_outputs, tree.children_left, tree.children_right, tree.children_default,
-        tree.features, tree.thresholds, tree.values, tree.node_sample_weights, data.X,
+        tree.features, tree.thresholds, tree.values, tree.node_sample_weights,
+        tree.is_categorical, tree.cat_bitset, tree.cat_num_words, data.X,
         data.X_missing, out_contribs, 0, 0, 0, unique_path_data, pweights, 1, 1, 1, -1, condition,
         condition_feature, 1
     );
@@ -962,6 +1021,8 @@ inline void tree_shap_recursive_v2(const unsigned num_outputs, const int *childr
                                    const int *children_default, const int *features,
                                    const tfloat *thresholds, const tfloat *values,
                                    const tfloat *node_sample_weight, const int max_depth,
+                                   const int *is_categorical, const int *cat_bitset,
+                                   unsigned cat_num_words,
                                    const tfloat *combination_sum, const int *duplicated_node,
                                    const tfloat *x, const bool *x_missing, tfloat *phi,
                                    unsigned node_index, unsigned unique_depth,
@@ -1047,18 +1108,39 @@ inline void tree_shap_recursive_v2(const unsigned num_outputs, const int *childr
             }
         }
 
+        // Determine which child x follows ("hot"), matching the v0/v1 routing:
+        // a missing feature follows the model's default child, otherwise it is
+        // decided by follows_left (numeric threshold or categorical membership).
+        // The hot child gets one_fraction = incoming_one_fraction (x "satisfies"
+        // it) and the cold child gets 0. Previously a missing value marked *both*
+        // children as unsatisfied, which ignored children_default and made v2
+        // disagree with v0/v1 (and with LightGBM/XGBoost pred_contrib) on any row
+        // with missing values.
+        unsigned hot_index;
+        if (x_missing[split_index]) {
+            hot_index = children_default[node_index];
+        } else if (follows_left(node_index, x[split_index], thresholds, is_categorical,
+                                cat_bitset, cat_num_words)) {
+            hot_index = children_left[node_index];
+        } else {
+            hot_index = children_right[node_index];
+        }
+        const bool hot_is_left = (static_cast<int>(hot_index) == children_left[node_index]);
+
         tree_shap_recursive_v2(
             num_outputs, children_left, children_right, children_default, features, thresholds, values,
-            node_sample_weight, max_depth, combination_sum, duplicated_node, x, x_missing, phi,
+            node_sample_weight, max_depth, is_categorical, cat_bitset, cat_num_words,
+            combination_sum, duplicated_node, x, x_missing, phi,
             left_index, unique_depth + 1, unique_path, pweights_residual, left_zero_fraction * incoming_zero_fraction,
-            incoming_one_fraction * int(x[split_index] <= thresholds[node_index]), split_index, leaf_count
+            incoming_one_fraction * int(hot_is_left), split_index, leaf_count
         );
 
         tree_shap_recursive_v2(
             num_outputs, children_left, children_right, children_default, features, thresholds, values,
-            node_sample_weight, max_depth, combination_sum, duplicated_node, x, x_missing, phi,
+            node_sample_weight, max_depth, is_categorical, cat_bitset, cat_num_words,
+            combination_sum, duplicated_node, x, x_missing, phi,
             right_index, unique_depth + 1, unique_path, pweights_residual, right_zero_fraction * incoming_zero_fraction,
-            incoming_one_fraction * int(x[split_index] > thresholds[node_index]), split_index, leaf_count
+            incoming_one_fraction * int(!hot_is_left), split_index, leaf_count
         );
     }
 }
@@ -1080,6 +1162,7 @@ inline void tree_shap_v2(const TreeEnsemble& tree, const tfloat *combination_sum
     tree_shap_recursive_v2(
         tree.num_outputs, tree.children_left, tree.children_right, tree.children_default,
         tree.features, tree.thresholds, tree.values, tree.node_sample_weights, tree.max_depth,
+        tree.is_categorical, tree.cat_bitset, tree.cat_num_words,
         combination_sum, duplicated_node, data.X, data.X_missing, out_contribs, 0, 0,
         unique_path_data, 1, 1, 1, -1, leaf_count
     );
@@ -1144,8 +1227,7 @@ inline unsigned build_merged_tree_recursive(TreeEnsemble &out_tree, const TreeEn
         i = 0;
     }
     
-    // split the data inds by this node's threshold
-    const tfloat t = trees.thresholds[row_offset + i];
+    // split the data inds by this node's split (numeric threshold or categorical set)
     const int f = trees.features[row_offset + i];
     const bool right_default = trees.children_default[row_offset + i] == trees.children_right[row_offset + i];
     int low_ptr = 0;
@@ -1156,7 +1238,9 @@ inline unsigned build_merged_tree_recursive(TreeEnsemble &out_tree, const TreeEn
         low_data_ind = data_inds[low_ptr];
         const int data_ind = std::abs(low_data_ind) * M + f;
         const bool is_missing = data_missing[data_ind];
-        if ((!is_missing && data[data_ind] > t) || (right_default && is_missing)) {
+        const bool goes_right = !follows_left(row_offset + i, data[data_ind], trees.thresholds,
+                                              trees.is_categorical, trees.cat_bitset, trees.cat_num_words);
+        if ((!is_missing && goes_right) || (right_default && is_missing)) {
             data_inds[low_ptr] = data_inds[high_ptr];
             data_inds[high_ptr] = low_data_ind;
             high_ptr -= 1;
@@ -1210,6 +1294,16 @@ inline unsigned build_merged_tree_recursive(TreeEnsemble &out_tree, const TreeEn
         out_tree.thresholds[pos] = trees.thresholds[row_offset + i];
         out_tree.node_sample_weights[pos] = num_background_data_inds;
 
+        // carry over categorical-split information so the merged tree routes
+        // set-membership nodes the same way the original ensemble did
+        if (trees.is_categorical != NULL && trees.is_categorical[row_offset + i]) {
+            out_tree.is_categorical[pos] = 1;
+            for (unsigned w = 0; w < out_tree.cat_num_words; ++w) {
+                out_tree.cat_bitset[pos * out_tree.cat_num_words + w] =
+                    trees.cat_bitset[(row_offset + i) * trees.cat_num_words + w];
+            }
+        }
+
         // build the right subtree
         return build_merged_tree_recursive(
             out_tree, trees, data, data_missing, right_data_inds,
@@ -1254,7 +1348,21 @@ struct Node {
     short cl, cr, cd, pnode, feat, pfeat; // uint_16
     float thres, value;
     char from_flag;
+    char is_cat;            // non-zero for a categorical (set-membership) split
+    const int *catset;      // bitset of categories that follow the left child (or NULL)
 };
+
+// Node-based analogue of follows_left() used by the independent Tree SHAP path.
+inline bool node_follows_left(const Node &nd, tfloat xval, unsigned cat_num_words) {
+    if (nd.is_cat) {
+        if (xval < 0) return false;
+        const unsigned c = static_cast<unsigned>(xval);
+        const unsigned word = c >> 5;
+        if (word >= cat_num_words || nd.catset == NULL) return false;
+        return (static_cast<unsigned>(nd.catset[word]) >> (c & 31u)) & 1u;
+    }
+    return xval <= nd.thres;
+}
 
 #define FROM_NEITHER 0
 #define FROM_X_NOT_R 1
@@ -1278,7 +1386,8 @@ inline void tree_shap_indep(const unsigned max_depth, const unsigned num_feats,
                             const bool *x_missing, const tfloat *r,
                             const bool *r_missing, tfloat *out_contribs,
                             float *pos_lst, float *neg_lst, signed short *feat_hist,
-                            float *memoized_weights, int *node_stack, Node *mytree) {
+                            float *memoized_weights, int *node_stack, Node *mytree,
+                            unsigned cat_num_words) {
 
 //     const bool DEBUG = true;
 //     ofstream myfile;
@@ -1316,20 +1425,20 @@ inline void tree_shap_indep(const unsigned max_depth, const unsigned num_feats,
     
     if (x_missing[feat]) {
         next_xnode = cd;
-    } else if (x[feat] > thres) {
-        next_xnode = cr;
-    } else if (x[feat] <= thres) {
+    } else if (node_follows_left(curr_node, x[feat], cat_num_words)) {
         next_xnode = cl;
+    } else {
+        next_xnode = cr;
     }
-    
+
     if (r_missing[feat]) {
         next_rnode = cd;
-    } else if (r[feat] > thres) {
-        next_rnode = cr;
-    } else if (r[feat] <= thres) {
+    } else if (node_follows_left(curr_node, r[feat], cat_num_words)) {
         next_rnode = cl;
+    } else {
+        next_rnode = cr;
     }
-    
+
     if (next_xnode != next_rnode) {
         mytree[next_xnode].from_flag = FROM_X_NOT_R;
         mytree[next_rnode].from_flag = FROM_R_NOT_X;
@@ -1423,8 +1532,8 @@ inline void tree_shap_indep(const unsigned max_depth, const unsigned num_feats,
             continue;
         }
 
-        const bool x_right = x[feat] > thres;
-        const bool r_right = r[feat] > thres;
+        const bool x_right = !node_follows_left(curr_node, x[feat], cat_num_words);
+        const bool r_right = !node_follows_left(curr_node, r[feat], cat_num_words);
 
         if (x_missing[feat]) {
             next_xnode = cd;
@@ -1660,7 +1769,7 @@ inline void print_progress_bar(tfloat &last_print, tfloat start_time, unsigned i
  * Runs Tree SHAP with feature independence assumptions on dense data.
  */
 inline void dense_independent(const TreeEnsemble& trees, const ExplanationDataset &data,
-                       tfloat *out_contribs, tfloat transform(const tfloat, const tfloat)) {
+                       tfloat *out_contribs, tfloat transform(const tfloat, const tfloat), const int n_jobs) {
 
     // reformat the trees for faster access
     Node *node_trees = new Node[trees.tree_limit * trees.max_nodes];
@@ -1685,17 +1794,13 @@ inline void dense_independent(const TreeEnsemble& trees, const ExplanationDatase
 
             node_tree[j].thres = trees.thresholds[en_ind];
             node_tree[j].feat = trees.features[en_ind];
+            node_tree[j].is_cat = (trees.is_categorical != NULL) ? trees.is_categorical[en_ind] : 0;
+            node_tree[j].catset = (trees.cat_bitset != NULL) ?
+                trees.cat_bitset + en_ind * trees.cat_num_words : NULL;
         }
     }
 
-    // preallocate arrays needed by the algorithm
-    float *pos_lst = new float[trees.max_nodes];
-    float *neg_lst = new float[trees.max_nodes];
-    int *node_stack = new int[(unsigned) trees.max_depth];
-    signed short *feat_hist = new signed short[data.M];
-    tfloat *tmp_out_contribs = new tfloat[(data.M + 1)];
-
-    // precompute all the weight coefficients
+    // precompute all the weight coefficients (shared, read-only during explanation)
     float *memoized_weights = new float[(trees.max_depth+1) * (trees.max_depth+1)];
     for (unsigned n = 0; n <= trees.max_depth; ++n) {
         for (unsigned m = 0; m <= trees.max_depth; ++m) {
@@ -1704,14 +1809,8 @@ inline void dense_independent(const TreeEnsemble& trees, const ExplanationDatase
     }
 
     // compute the explanations for each sample
-    tfloat *instance_out_contribs;
-    tfloat rescale_factor = 1.0;
-    tfloat margin_x = 0;
-    tfloat margin_r = 0;
-    time_t start_time = time(NULL);
-    tfloat last_print = 0;
     for (unsigned oind = 0; oind < trees.num_outputs; ++oind) {
-        // set the values int he reformated tree to the current output index
+        // set the values in the reformated tree to the current output index
         for (unsigned i = 0; i < trees.tree_limit; ++i) {
             Node *node_tree = node_trees + i * trees.max_nodes;
             for (unsigned j = 0; j < trees.max_nodes; ++j) {
@@ -1720,86 +1819,106 @@ inline void dense_independent(const TreeEnsemble& trees, const ExplanationDatase
             }
         }
 
-        // loop over all the samples
-        for (unsigned i = 0; i < data.num_X; ++i) {
-            const tfloat *x = data.X + i * data.M;
-            const bool *x_missing = data.X_missing + i * data.M;
-            instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
-            const tfloat y_i = data.y == NULL ? 0 : data.y[i];
+        // Explain every sample in parallel. Each thread owns its own scratch
+        // buffers (the algorithm reuses them across iterations, so they must not
+        // be shared) while node_trees / memoized_weights are read-only here. The
+        // per-sample output regions of out_contribs are disjoint across i, so
+        // there is no write contention. This mirrors the parallelisation of the
+        // tree_path_dependent path and is what makes n_jobs effective for
+        // interventional / model_output="log_loss" explanations.
+        #pragma omp parallel num_threads(n_jobs)
+        {
+            float *pos_lst = new float[trees.max_nodes];
+            float *neg_lst = new float[trees.max_nodes];
+            int *node_stack = new int[(unsigned) trees.max_depth];
+            signed short *feat_hist = new signed short[data.M];
+            tfloat *tmp_out_contribs = new tfloat[(data.M + 1)];
+            // tree_shap_indep mutates the Node structs (it stores a `from_flag`
+            // on each node while walking the tree), so every thread needs its own
+            // copy of the reformatted trees; sharing them races and corrupts the
+            // traversal. The value fields for the current output are already set
+            // in node_trees, so a shallow copy is sufficient (catset points into
+            // the read-only shared cat_bitset).
+            Node *thread_trees = new Node[trees.tree_limit * trees.max_nodes];
+            std::copy(node_trees, node_trees + trees.tree_limit * trees.max_nodes, thread_trees);
 
-            print_progress_bar(last_print, start_time, oind * data.num_X + i, data.num_X * trees.num_outputs);
+            #pragma omp for
+            for (int i = 0; i < static_cast<int>(data.num_X); ++i) {
+                const tfloat *x = data.X + i * data.M;
+                const bool *x_missing = data.X_missing + i * data.M;
+                tfloat *instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
+                const tfloat y_i = data.y == NULL ? 0 : data.y[i];
+                tfloat margin_x = 0, margin_r = 0, rescale_factor = 1.0;
 
-            // compute the model's margin output for x
-            if (transform != NULL) {
-                margin_x = trees.base_offset[oind];
-                for (unsigned k = 0; k < trees.tree_limit; ++k) {
-                    margin_x += tree_predict(k, trees, x, x_missing)[oind];
-                }
-            }
-
-            for (unsigned j = 0; j < data.num_R; ++j) {
-                const tfloat *r = data.R + j * data.M;
-                const bool *r_missing = data.R_missing + j * data.M;
-                std::fill_n(tmp_out_contribs, (data.M + 1), 0);
-
-                // compute the model's margin output for r
+                // compute the model's margin output for x
                 if (transform != NULL) {
-                    margin_r = trees.base_offset[oind];
+                    margin_x = trees.base_offset[oind];
                     for (unsigned k = 0; k < trees.tree_limit; ++k) {
-                        margin_r += tree_predict(k, trees, r, r_missing)[oind];
+                        margin_x += tree_predict(k, trees, x, x_missing)[oind];
                     }
                 }
 
-                for (unsigned k = 0; k < trees.tree_limit; ++k) {
-                    tree_shap_indep(
-                        trees.max_depth, data.M, trees.max_nodes, x, x_missing, r, r_missing, 
-                        tmp_out_contribs, pos_lst, neg_lst, feat_hist, memoized_weights, 
-                        node_stack, node_trees + k * trees.max_nodes
-                    );
-                }
+                for (unsigned j = 0; j < data.num_R; ++j) {
+                    const tfloat *r = data.R + j * data.M;
+                    const bool *r_missing = data.R_missing + j * data.M;
+                    std::fill_n(tmp_out_contribs, (data.M + 1), 0);
 
-                // compute the rescale factor
-                if (transform != NULL) {
-                    if (margin_x == margin_r) {
-                        rescale_factor = 1.0;
+                    // compute the model's margin output for r
+                    if (transform != NULL) {
+                        margin_r = trees.base_offset[oind];
+                        for (unsigned k = 0; k < trees.tree_limit; ++k) {
+                            margin_r += tree_predict(k, trees, r, r_missing)[oind];
+                        }
+                    }
+
+                    for (unsigned k = 0; k < trees.tree_limit; ++k) {
+                        tree_shap_indep(
+                            trees.max_depth, data.M, trees.max_nodes, x, x_missing, r, r_missing,
+                            tmp_out_contribs, pos_lst, neg_lst, feat_hist, memoized_weights,
+                            node_stack, thread_trees + k * trees.max_nodes, trees.cat_num_words
+                        );
+                    }
+
+                    // compute the rescale factor
+                    if (transform != NULL) {
+                        if (margin_x == margin_r) {
+                            rescale_factor = 1.0;
+                        } else {
+                            rescale_factor = (*transform)(margin_x, y_i) - (*transform)(margin_r, y_i);
+                            rescale_factor /= margin_x - margin_r;
+                        }
+                    }
+
+                    // add the effect of the current reference to our running total
+                    // this is where we can do per reference scaling for non-linear transformations
+                    for (unsigned k = 0; k < data.M; ++k) {
+                        instance_out_contribs[k * trees.num_outputs + oind] += tmp_out_contribs[k] * rescale_factor;
+                    }
+
+                    // Add the base offset
+                    if (transform != NULL) {
+                        instance_out_contribs[data.M * trees.num_outputs + oind] += (*transform)(trees.base_offset[oind] + tmp_out_contribs[data.M], 0);
                     } else {
-                        rescale_factor = (*transform)(margin_x, y_i) - (*transform)(margin_r, y_i);
-                        rescale_factor /= margin_x - margin_r;
+                        instance_out_contribs[data.M * trees.num_outputs + oind] += trees.base_offset[oind] + tmp_out_contribs[data.M];
                     }
                 }
 
-                // add the effect of the current reference to our running total
-                // this is where we can do per reference scaling for non-linear transformations
-                for (unsigned k = 0; k < data.M; ++k) {
-                    instance_out_contribs[k * trees.num_outputs + oind] += tmp_out_contribs[k] * rescale_factor;
-                }
-
-                // Add the base offset
-                if (transform != NULL) {
-                    instance_out_contribs[data.M * trees.num_outputs + oind] += (*transform)(trees.base_offset[oind] + tmp_out_contribs[data.M], 0);
-                } else {
-                    instance_out_contribs[data.M * trees.num_outputs + oind] += trees.base_offset[oind] + tmp_out_contribs[data.M];
+                // average the results over all the references.
+                for (unsigned j = 0; j < (data.M + 1); ++j) {
+                    instance_out_contribs[j * trees.num_outputs + oind] /= data.num_R;
                 }
             }
 
-            // average the results over all the references.
-            for (unsigned j = 0; j < (data.M + 1); ++j) {
-                instance_out_contribs[j * trees.num_outputs + oind] /= data.num_R;
-            }
-
-            // apply the base offset to the bias term
-            // for (unsigned j = 0; j < trees.num_outputs; ++j) {
-            //     instance_out_contribs[data.M * trees.num_outputs + j] += (*transform)(trees.base_offset[j], 0);
-            // }
+            delete[] pos_lst;
+            delete[] neg_lst;
+            delete[] node_stack;
+            delete[] feat_hist;
+            delete[] tmp_out_contribs;
+            delete[] thread_trees;
         }
     }
 
-    delete[] tmp_out_contribs;
     delete[] node_trees;
-    delete[] pos_lst;
-    delete[] neg_lst;
-    delete[] node_stack;
-    delete[] feat_hist;
     delete[] memoized_weights;
 }
 
@@ -1841,13 +1960,13 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
         case ALGORITHM::v0:
             // build explanation for each sample
             #pragma omp parallel for private(instance_out_contribs, tree, instance) num_threads(n_jobs)
-            for (unsigned i = 0; i < data.num_X; ++i) {
+            for (int i = 0; i < static_cast<int>(data.num_X); ++i) {
                 instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
                 data.get_x_instance(instance, i);
 
                 // aggregate the effect of explaining each tree
                 // (this works because of the linearity property of Shapley values)
-                for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                for (int j = 0; j < static_cast<int>(trees.tree_limit); ++j) {
                     trees.get_tree(tree, j);
                     tree_shap(tree, instance, instance_out_contribs, 0, 0);
                 }
@@ -1857,13 +1976,13 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
         case ALGORITHM::v1:
             // build explanation for each sample
             #pragma omp parallel for private(instance_out_contribs, tree, instance) num_threads(n_jobs)
-            for (unsigned i = 0; i < data.num_X; ++i) {
+            for (int i = 0; i < static_cast<int>(data.num_X); ++i) {
                 instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
                 data.get_x_instance(instance, i);
 
                 // aggregate the effect of explaining each tree
                 // (this works because of the linearity property of Shapley values)
-                for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                for (int j = 0; j < static_cast<int>(trees.tree_limit); ++j) {
                     trees.get_tree(tree, j);
                     tree_shap_v1(tree, instance, instance_out_contribs, 0, 0);
                 }
@@ -1885,7 +2004,7 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
             out_contribs_local, instance_out_contribs_local) num_threads(n_jobs)
             {
                 out_contribs_local = new tfloat[data.num_X * (data.M + 1) * trees.num_outputs];
-                for (unsigned i = 0; i < data.num_X; ++i) {
+                for (int i = 0; i < static_cast<int>(data.num_X); ++i) {
                     instance_out_contribs_local = out_contribs_local + i * (data.M + 1) * trees.num_outputs;
                     for (unsigned k = 0; k < (data.M + 1) * trees.num_outputs; ++k) {
                         instance_out_contribs_local[k] = 0;
@@ -1895,12 +2014,12 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
                 duplicated_node = new int[trees.max_nodes];
                 
                 #pragma omp for
-                for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                for (int j = 0; j < static_cast<int>(trees.tree_limit); ++j) {
                     trees.get_tree(tree, tree_thread[j]);
                     compute_combination_sum_v2(tree, combination_sum, duplicated_node);
 
                     // build explanation for each sample
-                    for (unsigned i = 0; i < data.num_X; ++i) {
+                    for (int i = 0; i < static_cast<int>(data.num_X); ++i) {
                         instance_out_contribs_local = out_contribs_local + i * (data.M + 1) * trees.num_outputs;
                         data.get_x_instance(instance, i);
                         tree_shap_v2(tree, combination_sum, duplicated_node, instance, instance_out_contribs_local);
@@ -1910,7 +2029,7 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
                 delete[] duplicated_node;
 
                 #pragma omp critical
-                for (unsigned i = 0; i < data.num_X; ++i) {
+                for (int i = 0; i < static_cast<int>(data.num_X); ++i) {
                     instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
                     instance_out_contribs_local = out_contribs_local + i * (data.M + 1) * trees.num_outputs;
                     for (unsigned k = 0; k < (data.M + 1) * trees.num_outputs; ++k) {
@@ -1939,7 +2058,7 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
             #pragma omp parallel private(tree, combination_sum_local, duplicated_node_local) num_threads(n_jobs)
             {
                 #pragma omp for
-                for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                for (int j = 0; j < static_cast<int>(trees.tree_limit); ++j) {
                     combination_sum_local = combination_sum + tree_thread[j] * max_leaves * max_combinations;
                     duplicated_node_local = duplicated_node + tree_thread[j] * trees.max_nodes;
                     trees.get_tree(tree, tree_thread[j]);
@@ -1952,10 +2071,10 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
             #pragma omp parallel private(instance_out_contribs, tree, instance, combination_sum_local, duplicated_node_local) num_threads(n_jobs)
             {
                 #pragma omp for
-                for (unsigned i = 0; i < data.num_X; ++i) {
+                for (int i = 0; i < static_cast<int>(data.num_X); ++i) {
                     instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
                     data.get_x_instance(instance, i);
-                    for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                    for (int j = 0; j < static_cast<int>(trees.tree_limit); ++j) {
                         combination_sum_local = combination_sum + j * max_leaves * max_combinations;
                         duplicated_node_local = duplicated_node + j * trees.max_nodes;
                         trees.get_tree(tree, j);
@@ -1970,7 +2089,7 @@ inline void dense_tree_path_dependent(const TreeEnsemble& trees, const Explanati
     }
 
     // apply the base offset to the bias term
-    for (unsigned i = 0; i < data.num_X; ++i) {
+    for (int i = 0; i < static_cast<int>(data.num_X); ++i) {
         instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
         for (unsigned j = 0; j < trees.num_outputs; ++j) {
             instance_out_contribs[data.M * trees.num_outputs + j] += trees.base_offset[j];
@@ -2002,7 +2121,7 @@ inline void dense_tree_interactions_path_dependent(const TreeEnsemble& trees, co
     int amount_of_unique_features = min(data.M, trees.max_nodes);
     int *unique_features = new int[trees.tree_limit * amount_of_unique_features];
     std::fill(unique_features, unique_features + trees.tree_limit * amount_of_unique_features, -1);
-    for (unsigned j = 0; j < trees.tree_limit; ++j) {
+    for (int j = 0; j < static_cast<int>(trees.tree_limit); ++j) {
         const int *features_row = trees.features + j * trees.max_nodes;
         int *unique_features_row = unique_features + j * amount_of_unique_features;
         for (unsigned k = 0; k < trees.max_nodes; ++k) {
@@ -2035,14 +2154,14 @@ inline void dense_tree_interactions_path_dependent(const TreeEnsemble& trees, co
                 off_contribs = new tfloat[contrib_row_size];
 
                 #pragma omp for
-                for (unsigned i = 0; i < data.num_X; ++i) {
+                for (int i = 0; i < static_cast<int>(data.num_X); ++i) {
                     instance_out_contribs = out_contribs + i * (data.M + 1) * contrib_row_size;
                     data.get_x_instance(instance, i);
 
                     // aggregate the effect of explaining each tree
                     // (this works because of the linearity property of Shapley values)
                     std::fill(diag_contribs, diag_contribs + contrib_row_size, 0);
-                    for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                    for (int j = 0; j < static_cast<int>(trees.tree_limit); ++j) {
                         trees.get_tree(tree, j);
                         tree_shap(tree, instance, diag_contribs, 0, 0);
 
@@ -2094,14 +2213,14 @@ inline void dense_tree_interactions_path_dependent(const TreeEnsemble& trees, co
                 off_contribs = new tfloat[contrib_row_size];
 
                 #pragma omp for
-                for (unsigned i = 0; i < data.num_X; ++i) {
+                for (int i = 0; i < static_cast<int>(data.num_X); ++i) {
                     instance_out_contribs = out_contribs + i * (data.M + 1) * contrib_row_size;
                     data.get_x_instance(instance, i);
 
                     // aggregate the effect of explaining each tree
                     // (this works because of the linearity property of Shapley values)
                     std::fill(diag_contribs, diag_contribs + contrib_row_size, 0);
-                    for (unsigned j = 0; j < trees.tree_limit; ++j) {
+                    for (int j = 0; j < static_cast<int>(trees.tree_limit); ++j) {
                         trees.get_tree(tree, j);
                         tree_shap_v1(tree, instance, diag_contribs, 0, 0);
 
@@ -2169,6 +2288,7 @@ inline void dense_global_path_dependent(const TreeEnsemble& trees, const Explana
 
     // allocate space for our new merged tree (we save enough room to totally split all samples if need be)
     TreeEnsemble merged_tree;
+    merged_tree.cat_num_words = trees.cat_num_words; // must be set before allocate() so cat_bitset is sized
     merged_tree.allocate(1, (data.num_X + data.num_R) * 2, trees.num_outputs);
     
     // collapse the ensemble of trees into a single tree that has the same behavior
@@ -2181,7 +2301,7 @@ inline void dense_global_path_dependent(const TreeEnsemble& trees, const Explana
     // explain each sample using our new merged tree
     ExplanationDataset instance;
     tfloat *instance_out_contribs;
-    for (unsigned i = 0; i < data.num_X; ++i) {
+    for (int i = 0; i < static_cast<int>(data.num_X); ++i) {
         instance_out_contribs = out_contribs + i * (data.M + 1) * trees.num_outputs;
         data.get_x_instance(instance, i);
        
@@ -2212,7 +2332,7 @@ inline void dense_tree_shap(const TreeEnsemble& trees, const ExplanationDataset 
         case FEATURE_DEPENDENCE::independent:
             if (interactions) {
                 std::cerr << "FEATURE_DEPENDENCE::independent does not support interactions!\n";
-            } else dense_independent(trees, data, out_contribs, transform);
+            } else dense_independent(trees, data, out_contribs, transform, n_jobs);
             return;
         
         case FEATURE_DEPENDENCE::tree_path_dependent:

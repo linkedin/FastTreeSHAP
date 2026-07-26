@@ -1,13 +1,13 @@
-from setuptools import setup, Extension
-from setuptools.command.build_ext import build_ext as _build_ext
-import os
-import re
 import codecs
+import os
 import platform
-from distutils.sysconfig import get_config_var, get_python_inc
-from distutils.version import LooseVersion
+import re
 import sys
-import subprocess
+from distutils.sysconfig import get_config_var
+from distutils.version import LooseVersion
+
+from setuptools import Extension, setup
+from setuptools.command.build_ext import build_ext as _build_ext
 
 # to publish use:
 # > python setup.py sdist bdist_wheel upload
@@ -80,7 +80,11 @@ def run_setup(with_binary, with_openmp, test_xgboost, test_lightgbm, test_catboo
             compile_args.append('/MD')
         if with_openmp:
             if sys.platform == "darwin":
+                # clang needs libomp (brew install libomp) + -Xpreprocessor
                 compile_args += ['-Xpreprocessor', '-fopenmp', '-lomp']
+            elif sys.platform == "win32":
+                # MSVC uses /openmp, not the GCC/Clang -fopenmp flag
+                compile_args.append('/openmp')
             else:
                 compile_args.append('-fopenmp')
                 link_args.append('-fopenmp')
@@ -89,7 +93,7 @@ def run_setup(with_binary, with_openmp, test_xgboost, test_lightgbm, test_catboo
             Extension('fasttreeshap._cext', sources=['fasttreeshap/cext/_cext.cc'],
                       extra_compile_args=compile_args, extra_link_args=link_args))
 
-    tests_require = ['pytest', 'pytest-mpl', 'pytest-cov']
+    tests_require = ['pytest', 'pytest-cov', 'pytest-xdist']
     if test_xgboost:
         tests_require += ['xgboost']
     if test_lightgbm:
@@ -147,9 +151,13 @@ def run_setup(with_binary, with_openmp, test_xgboost, test_lightgbm, test_catboo
         ],
         package_data={'fasttreeshap': ['plots/resources/*', 'cext/tree_shap.h']},
         cmdclass={'build_ext': build_ext},
-        setup_requires=['numpy'],
-        install_requires=['numpy', 'scipy', 'scikit-learn', 'pandas', 'tqdm>4.25.0',
-                          'packaging>20.9', 'slicer==0.0.7', 'numba', 'cloudpickle', 'psutil', 'shap'],
+        setup_requires=['numpy>=2.0.0'],
+        # slicer is relaxed from the old ==0.0.7 pin (0.0.8 works and is required
+        # by NumPy-2-compatible shap); shap floored at 0.46 so `pip install` does
+        # not drag in the NumPy-1-only shap 0.45. (fasttreeshap does not import
+        # shap at runtime; it is kept for API parity / the test suite.)
+        install_requires=['numpy>=1.19', 'scipy', 'scikit-learn', 'pandas', 'tqdm>4.25.0',
+                          'packaging>20.9', 'slicer>=0.0.7', 'numba', 'cloudpickle', 'psutil', 'shap>=0.46'],
         extras_require=extras_require,
         ext_modules=ext_modules,
         classifiers=[
@@ -211,7 +219,7 @@ def try_run_setup(**kwargs):
             print("ERROR: Failed to build!")
 
 
-# we seem to need this import guard for appveyor
+# only run the build when setup.py is executed directly (not when imported)
 if __name__ == "__main__":
     try_run_setup(
         with_binary=True, with_openmp=True, test_xgboost=True, test_lightgbm=True, test_catboost=True,

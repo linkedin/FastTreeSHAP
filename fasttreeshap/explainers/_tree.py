@@ -1,20 +1,18 @@
-import time
-import numpy as np
-import scipy.special
-import multiprocessing
-import sys
 import json
 import os
-import struct
-import itertools
+import time
+import warnings
+
+import numpy as np
+import pandas as pd
+import scipy.special
 from packaging import version
-from ._explainer import Explainer
+
+from .. import maskers
+from .._explanation import Explanation
 from ..utils import assert_import, record_import_error, safe_isinstance
 from ..utils._legacy import DenseData
-from .._explanation import Explanation
-from .. import maskers
-import warnings
-import pandas as pd
+from ._explainer import Explainer
 
 warnings.formatwarning = lambda msg, *args, **kwargs: str(msg) + '\n' # ignore everything except the message
 
@@ -26,7 +24,7 @@ except ImportError as e:
     record_import_error("cext", "C extension was not built during install!", e)
 
 try:
-    import pyspark
+    import pyspark  # noqa: F401  # imported only to probe availability
 except ImportError as e:
     record_import_error("pyspark", "PySpark could not be imported!", e)
 
@@ -51,6 +49,96 @@ algorithm_codes = {
     "v2_2": 4,
     "auto": 5
 }
+
+
+def _build_cat_bitset(num_nodes, is_categorical, cat_thresholds):
+    """Pack per-node categorical (set-membership) splits into an int32 bitset.
+
+    Returns ``(cat_num_words, cat_bitset)`` where ``cat_bitset`` has shape
+    ``(num_nodes, cat_num_words)`` and bit ``c`` of node ``n`` is set when
+    category ``c`` should follow the left child of node ``n`` (this is how
+    LightGBM's "==" splits route samples). ``cat_num_words`` is ``0`` and the
+    bitset is empty when the tree/ensemble contains no categorical splits, in
+    which case the C extension behaves exactly as before.
+    """
+    max_cat = -1
+    for cats in cat_thresholds.values():
+        for c in cats:
+            if c > max_cat:
+                max_cat = c
+    if max_cat < 0:
+        return 0, np.zeros((num_nodes, 0), dtype=np.int32)
+    cat_num_words = (max_cat // 32) + 1
+    # build in uint32 so bit 31 can be set without overflow, then reinterpret
+    # the bits as int32 (the C extension reads the words as unsigned).
+    bs = np.zeros((num_nodes, cat_num_words), dtype=np.uint32)
+    for node, cats in cat_thresholds.items():
+        for c in cats:
+            if c < 0:
+                continue
+            bs[node, c // 32] |= np.uint32(1) << np.uint32(c % 32)
+    return cat_num_words, bs.view(np.int32)
+
+
+def _encode_lightgbm_dataframe(model, X):
+    """Encode a pandas DataFrame/Series into the numeric matrix LightGBM feeds to
+    its predictor, so ``shap_values(df)`` works on categorical models exactly like
+    ``booster.predict(df, pred_contrib=True)``.
+
+    LightGBM's C++ core (and therefore FastTreeSHAP's C extension) cannot accept
+    string values: pandas ``category`` columns must first be replaced by their
+    integer category *codes*. The codes must use the same category ordering as at
+    training time, which LightGBM stores on the booster as ``pandas_categorical``
+    (a list, one entry per category-dtype column, in column order). Values that
+    are missing or unseen at prediction time map to code ``-1`` -- LightGBM's own
+    missing/unknown categorical code, which its trees route to the right child --
+    so we keep them as the *present* value ``-1`` rather than NaN. Remaining
+    (numeric) columns are coerced to float, preserving NaN so the tree's
+    ``children_default`` missing logic applies.
+
+    Returns ``(values, flat)`` where ``values`` is a float64 ndarray and ``flat``
+    is True when a single sample (Series) was passed, or ``None`` when ``X`` is
+    not a pandas object (the caller then keeps its existing handling).
+    """
+    import pandas as pd
+
+    flat = False
+    if safe_isinstance(X, "pandas.core.series.Series"):
+        X = X.to_frame().T
+        flat = True
+    elif not safe_isinstance(X, "pandas.core.frame.DataFrame"):
+        return None
+
+    booster = getattr(model, "original_model", None)
+    df = X
+    # align columns to the model's feature order when they are named to match
+    feat_names = None
+    try:
+        feat_names = list(booster.feature_name()) if booster is not None else None
+    except Exception:
+        feat_names = None
+    if feat_names and set(feat_names).issubset(set(map(str, df.columns))):
+        df = df[feat_names]
+
+    pandas_categorical = getattr(booster, "pandas_categorical", None) or []
+    cat_i = 0
+    columns = []
+    for col in df.columns:
+        s = df[col]
+        if isinstance(s.dtype, pd.CategoricalDtype):
+            # re-map to the training category order so codes match the model
+            if cat_i < len(pandas_categorical):
+                s = s.cat.set_categories(pandas_categorical[cat_i])
+            cat_i += 1
+            # .cat.codes yields 0..n-1 for known categories and -1 for missing /
+            # unseen, which is exactly LightGBM's own encoding (kept as present).
+            columns.append(s.cat.codes.to_numpy(dtype=np.float64))
+        else:
+            columns.append(pd.to_numeric(s, errors="coerce").to_numpy(dtype=np.float64))
+
+    values = np.column_stack(columns) if columns else np.empty((len(df), 0), dtype=np.float64)
+    return values, flat
+
 
 class Tree(Explainer):
     """ Uses Tree SHAP algorithms to explain the output of ensemble tree models.
@@ -87,11 +175,11 @@ class Tree(Explainer):
         algorithm : "auto" (default), "v0", "v1" or "v2"
             The "v0" algorithm refers to TreeSHAP algorithm in SHAP package (https://github.com/slundberg/shap).
             The "v1" and "v2" algorithms refer to Fast TreeSHAP v1 algorithm and Fast TreeSHAP v2 algorithm
-            proposed in paper https://arxiv.org/abs/2109.09847 (Jilei 2021). In practice, Fast TreeSHAP v1 is 1.5x 
-            faster than TreeSHAP while keeping the memory cost unchanged, and Fast TreeSHAP v2 is 2.5x faster than 
-            TreeSHAP at the cost of a slightly higher memory usage. The default value of algorithm is "auto", 
-            which automatically chooses the most appropriate algorithm to use. Specifically, we always prefer 
-            "v1" over "v0", and we prefer "v2" over "v1" when the number of samples to be explained is sufficiently 
+            proposed in paper https://arxiv.org/abs/2109.09847 (Jilei 2021). In practice, Fast TreeSHAP v1 is 1.5x
+            faster than TreeSHAP while keeping the memory cost unchanged, and Fast TreeSHAP v2 is 2.5x faster than
+            TreeSHAP at the cost of a slightly higher memory usage. The default value of algorithm is "auto",
+            which automatically chooses the most appropriate algorithm to use. Specifically, we always prefer
+            "v1" over "v0", and we prefer "v2" over "v1" when the number of samples to be explained is sufficiently
             large, and the memory constraint is also satisfied.
 
         n_jobs : -1 (default), or a positive integer
@@ -196,6 +284,19 @@ class Tree(Explainer):
 
         if feature_perturbation not in feature_perturbation_codes:
             raise ValueError("Invalid feature_perturbation option!")
+        # feature_perturbation="global_path_dependent" is disabled: its merged-tree
+        # weighting is broken (the vast majority of merged-tree nodes get a zero
+        # background weight, producing divide-by-zero NaNs or silently incorrect
+        # SHAP values). The same defect exists verbatim in the upstream `shap`
+        # C extension this code was forked from. Rather than return wrong values
+        # we fail loudly and point users at the two reliable options.
+        if feature_perturbation == "global_path_dependent":
+            raise NotImplementedError(
+                "feature_perturbation=\"global_path_dependent\" is not supported: its "
+                "merged-tree implementation produces incorrect (often NaN) SHAP values. "
+                "Use feature_perturbation=\"tree_path_dependent\" (no background data needed) "
+                "or feature_perturbation=\"interventional\" (with a background dataset) instead."
+            )
         if algorithm not in algorithm_codes:
             raise ValueError("Invalid algorithm option!")
 
@@ -251,11 +352,16 @@ class Tree(Explainer):
 
         start_time = time.time()
 
+        # Keep the DataFrame intact when handing it to shap_values: the input
+        # validation / LightGBM categorical encoding (and the native shortcut
+        # predict) all accept a DataFrame directly, and converting to `.values`
+        # here would turn a categorical frame into an unconvertible object array.
         if safe_isinstance(X, "pandas.core.frame.DataFrame"):
             feature_names = list(X.columns)
-            X = X.values
+            explanation_data = X.values
         else:
             feature_names = getattr(self, "data_feature_names", None)
+            explanation_data = X
 
         if not interactions:
             v = self.shap_values(X, y=y, from_call=True, check_additivity=check_additivity, approximate=self.approximate)
@@ -271,7 +377,7 @@ class Tree(Explainer):
         else:
             ev_tiled = np.tile(self.expected_value, v.shape[0])
 
-        return Explanation(v, base_values=ev_tiled, data=X, feature_names=feature_names, compute_time=time.time() - start_time)
+        return Explanation(v, base_values=ev_tiled, data=explanation_data, feature_names=feature_names, compute_time=time.time() - start_time)
 
     def _validate_inputs(self, X, y, tree_limit, check_additivity):
         # see if we have a default tree_limit in place.
@@ -281,11 +387,20 @@ class Tree(Explainer):
         if tree_limit < 0 or tree_limit > self.model.values.shape[0]:
             tree_limit = self.model.values.shape[0]
         # convert dataframes
-        if safe_isinstance(X, "pandas.core.series.Series"):
+        flat_output = False
+        encoded = None
+        if self.model.model_type in ("lightgbm", "gpboost"):
+            # LightGBM models may be trained on pandas categoricals whose values
+            # are strings; encode them to the integer category codes the model
+            # expects (see _encode_lightgbm_dataframe) instead of crashing on
+            # `X.astype(float)`.
+            encoded = _encode_lightgbm_dataframe(self.model, X)
+        if encoded is not None:
+            X, flat_output = encoded
+        elif safe_isinstance(X, "pandas.core.series.Series"):
             X = X.values
         elif safe_isinstance(X, "pandas.core.frame.DataFrame"):
             X = X.values
-        flat_output = False
         if len(X.shape) == 1:
             flat_output = True
             X = X.reshape(1, X.shape[0])
@@ -372,9 +487,12 @@ class Tree(Explainer):
                     X = xgboost.DMatrix(X)
                 if tree_limit == -1:
                     tree_limit = 0
+                # XGBoost 2.0 removed the `ntree_limit` argument in favour of
+                # `iteration_range=(start, end)` (end exclusive; (0, 0) = all trees).
+                iteration_range = (0, tree_limit)
                 try:
                     phi = self.model.original_model.predict(
-                        X, ntree_limit=tree_limit, pred_contribs=True,
+                        X, iteration_range=iteration_range, pred_contribs=True,
                         approx_contribs=approximate, validate_features=False
                     )
                 except ValueError as e:
@@ -383,7 +501,7 @@ class Tree(Explainer):
 
                 if check_additivity and self.model.model_output == "raw":
                     model_output_vals = self.model.original_model.predict(
-                        X, ntree_limit=tree_limit, output_margin=True,
+                        X, iteration_range=iteration_range, output_margin=True,
                         validate_features=False
                     )
 
@@ -423,6 +541,18 @@ class Tree(Explainer):
                     self.assert_additivity(out, model_output_vals)
 
                 return out
+
+        # if we reach here the model must have been parsed into the internal dense
+        # format; if it wasn't (self.model.trees is None) fail with a clear message
+        # instead of a cryptic AttributeError deep in the algorithm selection below.
+        if self.model.trees is None or not hasattr(self.model, "num_nodes"):
+            raise Exception(
+                "This model could not be parsed into FastTreeSHAP's internal format. "
+                "This typically means the compiled C extension (fasttreeshap._cext) "
+                "failed to build/load, or the model uses a structure only supported "
+                "through the native library. Re-install so the C extension builds "
+                "against your NumPy, or try TreeExplainer(model, shortcut=True)."
+            )
 
         # choose the most appropriate TreeSHAP algorithm
         if self.algorithm == "auto":
@@ -466,14 +596,16 @@ class Tree(Explainer):
                 self.model.features, self.model.thresholds, self.model.values, self.model.node_sample_weight,
                 self.model.max_depth, X, X_missing, y, self.data, self.data_missing, tree_limit,
                 self.model.base_offset, phi, feature_perturbation_codes[self.feature_perturbation],
-                output_transform_codes[transform], algorithm_codes[algorithm], self.n_jobs, False
+                output_transform_codes[transform], algorithm_codes[algorithm], self.n_jobs, False,
+                self.model.is_categorical, self.model.cat_bitset, self.model.cat_num_words
             )
         else:
             _cext.dense_tree_saabas(
                 self.model.children_left, self.model.children_right, self.model.children_default,
                 self.model.features, self.model.thresholds, self.model.values,
                 self.model.max_depth, tree_limit, self.model.base_offset, output_transform_codes[transform],
-                X, X_missing, y, phi
+                X, X_missing, y, phi,
+                self.model.is_categorical, self.model.cat_bitset, self.model.cat_num_words
             )
 
         out = self._get_shap_output(phi, flat_output)
@@ -493,7 +625,7 @@ class Tree(Explainer):
         try:
             import psutil
             memory_tolerance = 0.25 * psutil.virtual_memory().total
-        except:
+        except Exception:
             memory_tolerance = 4294967296  # 4GB
         if self.memory_tolerance > 0:
             memory_tolerance = min(memory_tolerance, self.memory_tolerance * 1073741824)
@@ -576,7 +708,8 @@ class Tree(Explainer):
                 X = xgboost.DMatrix(X)
             if tree_limit == -1:
                 tree_limit = 0
-            phi = self.model.original_model.predict(X, ntree_limit=tree_limit, pred_interactions=True, validate_features=False)
+            # XGBoost 2.0 replaced `ntree_limit` with `iteration_range`.
+            phi = self.model.original_model.predict(X, iteration_range=(0, tree_limit), pred_interactions=True, validate_features=False)
 
             # note we pull off the last column and keep it as our expected_value
             if len(phi.shape) == 4:
@@ -595,7 +728,8 @@ class Tree(Explainer):
             self.model.features, self.model.thresholds, self.model.values, self.model.node_sample_weight,
             self.model.max_depth, X, X_missing, y, self.data, self.data_missing, tree_limit,
             self.model.base_offset, phi, feature_perturbation_codes[self.feature_perturbation],
-            output_transform_codes[transform], algorithm_codes[algorithm], self.n_jobs, True
+            output_transform_codes[transform], algorithm_codes[algorithm], self.n_jobs, True,
+            self.model.is_categorical, self.model.cat_bitset, self.model.cat_num_words
         )
 
         return self._get_shap_interactions_output(phi,flat_output)
@@ -652,7 +786,7 @@ class Tree(Explainer):
 
         try:
             TreeEnsemble(model)
-        except:
+        except Exception:
             return False
         return True
 
@@ -910,7 +1044,6 @@ class TreeEnsemble:
             else:
                 assert False, "Unsupported Spark model type: " + str(type(model))
         elif safe_isinstance(model, "xgboost.core.Booster"):
-            import xgboost
             self.original_model = model
             self.model_type = "xgboost"
             xgb_loader = XGBTreeModelLoader(self.original_model)
@@ -921,7 +1054,6 @@ class TreeEnsemble:
             if xgb_loader.num_class > 0:
                 self.num_stacked_models = xgb_loader.num_class
         elif safe_isinstance(model, "xgboost.sklearn.XGBClassifier"):
-            import xgboost
             self.input_dtype = np.float32
             self.model_type = "xgboost"
             self.original_model = model.get_booster()
@@ -938,7 +1070,6 @@ class TreeEnsemble:
                 else:
                     self.model_output = "probability"
         elif safe_isinstance(model, "xgboost.sklearn.XGBRegressor"):
-            import xgboost
             self.original_model = model.get_booster()
             self.model_type = "xgboost"
             xgb_loader = XGBTreeModelLoader(self.original_model)
@@ -949,7 +1080,6 @@ class TreeEnsemble:
             if xgb_loader.num_class > 0:
                 self.num_stacked_models = xgb_loader.num_class
         elif safe_isinstance(model, "xgboost.sklearn.XGBRanker"):
-            import xgboost
             self.original_model = model.get_booster()
             self.model_type = "xgboost"
             xgb_loader = XGBTreeModelLoader(self.original_model)
@@ -963,11 +1093,17 @@ class TreeEnsemble:
             assert_import("lightgbm")
             self.model_type = "lightgbm"
             self.original_model = model
-            tree_info = self.original_model.dump_model()["tree_info"]
+            dumped_model = self.original_model.dump_model()
+            tree_info = dumped_model["tree_info"]
             try:
                 self.trees = [SingleTree(e, data=data, data_missing=data_missing) for e in tree_info]
-            except:
-                self.trees = None # we get here because the cext can't handle categorical splits yet
+            except Exception:
+                self.trees = None # fall back to the native "shortcut" path if parsing fails
+            # a multiclass Booster stacks num_class trees per boosting iteration;
+            # without this the classes get summed into a single (wrong) output
+            num_class = dumped_model.get("num_class", 1)
+            if num_class > 1:
+                self.num_stacked_models = num_class
 
             self.objective = objective_name_map.get(model.params.get("objective", "regression"), None)
             self.tree_output = tree_output_name_map.get(model.params.get("objective", "regression"), None)
@@ -976,11 +1112,15 @@ class TreeEnsemble:
             assert_import("gpboost")
             self.model_type = "gpboost"
             self.original_model = model
-            tree_info = self.original_model.dump_model()["tree_info"]
+            dumped_model = self.original_model.dump_model()
+            tree_info = dumped_model["tree_info"]
             try:
                 self.trees = [SingleTree(e, data=data, data_missing=data_missing) for e in tree_info]
-            except:
-                self.trees = None # we get here because the cext can't handle categorical splits yet
+            except Exception:
+                self.trees = None # fall back to the native "shortcut" path if parsing fails
+            num_class = dumped_model.get("num_class", 1)
+            if num_class > 1:
+                self.num_stacked_models = num_class
 
             self.objective = objective_name_map.get(model.params.get("objective", "regression"), None)
             self.tree_output = tree_output_name_map.get(model.params.get("objective", "regression"), None)
@@ -992,7 +1132,7 @@ class TreeEnsemble:
             tree_info = self.original_model.dump_model()["tree_info"]
             try:
                 self.trees = [SingleTree(e, data=data, data_missing=data_missing) for e in tree_info]
-            except:
+            except Exception:
                 self.trees = None # we get here because the cext can't handle categorical splits yet
             self.objective = objective_name_map.get(model.objective, None)
             self.tree_output = tree_output_name_map.get(model.objective, None)
@@ -1006,7 +1146,7 @@ class TreeEnsemble:
             tree_info = self.original_model.dump_model()["tree_info"]
             try:
                 self.trees = [SingleTree(e, data=data, data_missing=data_missing) for e in tree_info]
-            except:
+            except Exception:
                 self.trees = None # we get here because the cext can't handle categorical splits yet
             # Note: for ranker, leaving tree_output and objective as None as they
             # are not implemented in native code yet
@@ -1019,7 +1159,7 @@ class TreeEnsemble:
             tree_info = self.original_model.dump_model()["tree_info"]
             try:
                 self.trees = [SingleTree(e, data=data, data_missing=data_missing) for e in tree_info]
-            except:
+            except Exception:
                 self.trees = None # we get here because the cext can't handle categorical splits yet
             self.objective = objective_name_map.get(model.objective, None)
             self.tree_output = tree_output_name_map.get(model.objective, None)
@@ -1039,7 +1179,7 @@ class TreeEnsemble:
             try:
                 cb_loader = CatBoostTreeModelLoader(model)
                 self.trees = cb_loader.get_trees(data=data, data_missing=data_missing)
-            except:
+            except Exception:
                 self.trees = None # we get here because the cext can't handle categorical splits yet
             self.tree_output = "log_odds"
             self.objective = "binary_crossentropy"
@@ -1096,6 +1236,8 @@ class TreeEnsemble:
             self.thresholds = np.zeros((num_trees, max_nodes), dtype=self.internal_dtype)
             self.values = np.zeros((num_trees, max_nodes, self.num_outputs), dtype=self.internal_dtype)
             self.node_sample_weight = np.zeros((num_trees, max_nodes), dtype=self.internal_dtype)
+            # per-node flag marking categorical (set-membership) splits, e.g. LightGBM "=="
+            self.is_categorical = np.zeros((num_trees, max_nodes), dtype=np.int32)
 
             for i in range(num_trees):
                 self.children_left[i,:len(self.trees[i].children_left)] = self.trees[i].children_left
@@ -1103,6 +1245,8 @@ class TreeEnsemble:
                 self.children_default[i,:len(self.trees[i].children_default)] = self.trees[i].children_default
                 self.features[i,:len(self.trees[i].features)] = self.trees[i].features
                 self.thresholds[i,:len(self.trees[i].thresholds)] = self.trees[i].thresholds
+                if getattr(self.trees[i], "is_categorical", None) is not None:
+                    self.is_categorical[i,:len(self.trees[i].is_categorical)] = self.trees[i].is_categorical
                 if self.num_stacked_models > 1:
                     # stack_pos = int(i // (num_trees / self.num_stacked_models))
                     stack_pos = i % self.num_stacked_models
@@ -1114,6 +1258,29 @@ class TreeEnsemble:
                 # ensure that the passed background dataset lands in every leaf
                 if np.min(self.trees[i].node_sample_weight) <= 0:
                     self.fully_defined_weighting = False
+
+            # assemble the ensemble-wide categorical bitset using a single global
+            # word count so every tree's slice has the same stride (mirroring the
+            # thresholds layout the C extension expects).
+            max_cat = -1
+            for t in self.trees:
+                for cats in getattr(t, "cat_thresholds", {}).values():
+                    for c in cats:
+                        if c > max_cat:
+                            max_cat = c
+            if max_cat < 0:
+                self.cat_num_words = 0
+                self.cat_bitset = np.zeros((num_trees, max_nodes, 0), dtype=np.int32)
+            else:
+                self.cat_num_words = (max_cat // 32) + 1
+                bs = np.zeros((num_trees, max_nodes, self.cat_num_words), dtype=np.uint32)
+                for i in range(num_trees):
+                    for node, cats in getattr(self.trees[i], "cat_thresholds", {}).items():
+                        for c in cats:
+                            if c < 0:
+                                continue
+                            bs[i, node, c // 32] |= np.uint32(1) << np.uint32(c % 32)
+                self.cat_bitset = bs.view(np.int32)
 
             self.num_nodes = np.array([len(t.values) for t in self.trees], dtype=np.int32)
             self.max_depth = np.max([t.max_depth for t in self.trees])
@@ -1171,8 +1338,13 @@ class TreeEnsemble:
         if tree_limit is None:
             tree_limit = -1 if self.tree_limit is None else self.tree_limit
 
-        # convert dataframes
-        if safe_isinstance(X, "pandas.core.series.Series"):
+        # convert dataframes (encoding LightGBM pandas categoricals to codes)
+        encoded = None
+        if self.model_type in ("lightgbm", "gpboost"):
+            encoded = _encode_lightgbm_dataframe(self, X)
+        if encoded is not None:
+            X, _ = encoded
+        elif safe_isinstance(X, "pandas.core.series.Series"):
             X = X.values
         elif safe_isinstance(X, "pandas.core.frame.DataFrame"):
             X = X.values
@@ -1199,7 +1371,8 @@ class TreeEnsemble:
             self.children_left, self.children_right, self.children_default,
             self.features, self.thresholds, self.values,
             self.max_depth, tree_limit, self.base_offset, output_transform_codes[transform],
-            X, X_missing, y, output
+            X, X_missing, y, output,
+            self.is_categorical, self.cat_bitset, self.cat_num_words
         )
 
         # drop dimensions we don't need
@@ -1314,6 +1487,10 @@ class SingleTree:
             self.thresholds = np.zeros((2*num_parents+1), dtype=np.float64)
             self.values = [0]*(2*num_parents+1)  # fix a bug for empty trees
             self.node_sample_weight = np.ones((2*num_parents+1), dtype=np.float64)  # fix a bug for empty trees
+            # categorical ("==") splits: is_categorical[node] marks a set-membership
+            # split and cat_thresholds[node] holds the category ids that go LEFT.
+            self.is_categorical = np.zeros((2*num_parents+1), dtype=np.int32)
+            self.cat_thresholds = {}
             visited, queue = [], [start]
             while queue:
                 vertex = queue.pop(0)
@@ -1332,7 +1509,17 @@ class SingleTree:
                         else:
                             self.children_default[vertex['split_index']] = self.children_right[vertex['split_index']]
                         self.features[vertex['split_index']] = vertex['split_feature']
-                        self.thresholds[vertex['split_index']] = vertex['threshold']
+                        if vertex.get('decision_type', '<=') == '==':
+                            # LightGBM categorical split: `threshold` is a string of
+                            # "||"-joined category ids; the sample follows the left
+                            # child when its (integer) feature value is in that set.
+                            self.is_categorical[vertex['split_index']] = 1
+                            cats = [int(c) for c in str(vertex['threshold']).split('||')]
+                            self.cat_thresholds[int(vertex['split_index'])] = cats
+                            # threshold is unused for categorical nodes; keep it finite
+                            self.thresholds[vertex['split_index']] = 0.0
+                        else:
+                            self.thresholds[vertex['split_index']] = vertex['threshold']
                         self.values[vertex['split_index']] = [vertex['internal_value']]
                         self.node_sample_weight[vertex['split_index']] = vertex['internal_count']
                         visited.append(vertex['split_index'])
@@ -1383,9 +1570,33 @@ class SingleTree:
                 if "children" in node:
                     tree.children_left[i] = node["yes"]
                     tree.children_right[i] = node["no"]
-                    tree.children_default[i] = node["missing"]
-                    tree.features[i] = node["split"]
-                    tree.thresholds[i] = node["split_condition"]
+                    split = node["split"]
+                    # XGBoost's JSON dump names split features "f<index>" (or the
+                    # raw feature name); with feature_names cleared it is always
+                    # "f<index>", so strip the leading "f" to recover the index.
+                    if isinstance(split, str):
+                        split = int(split[1:]) if split[:1] == "f" else int(split)
+                    tree.features[i] = split
+                    if "split_condition" in node:
+                        # XGBoost routes with `x < threshold` (left) whereas this
+                        # SHAP engine uses `x <= threshold`. Nudge the threshold
+                        # down by the smallest float32 step so the two agree when a
+                        # value lands exactly on a split point.
+                        tree.thresholds[i] = np.nextafter(
+                            np.float32(node["split_condition"]), np.float32(-np.inf)
+                        )
+                    else:
+                        # Boolean-column split: XGBoost dumps these as a bare
+                        # "[fN]" indicator with no split_condition (and no missing
+                        # direction). The feature is a {0, 1} indicator, so a
+                        # threshold of 0.5 reproduces the routing: 0 (False) -> yes
+                        # (left), 1 (True) -> no (right).
+                        tree.thresholds[i] = np.float32(0.5)
+                    # boolean-indicator nodes also omit "missing"; XGBoost's own
+                    # default there is the "yes" branch (it is only exercised when
+                    # the indicator itself is missing, which does not happen for
+                    # one-hot columns).
+                    tree.children_default[i] = node.get("missing", node["yes"])
 
                     for n in node["children"]:
                         extract_data(n, tree)
@@ -1400,7 +1611,8 @@ class SingleTree:
 
             nodes = [t.lstrip() for t in tree[:-1].split("\n")]
             nodes_dict = {}
-            for n in nodes: nodes_dict[int(n.split(":")[0])] = n.split(":")[1]
+            for n in nodes:
+                nodes_dict[int(n.split(":")[0])] = n.split(":")[1]
             m = max(nodes_dict.keys())+1
             children_left = -1*np.ones(m,dtype="int32")
             children_right = -1*np.ones(m,dtype="int32")
@@ -1450,12 +1662,28 @@ class SingleTree:
         else:
             raise Exception("Unknown input to SingleTree constructor: " + str(tree))
 
+        # Default categorical metadata for tree types without categorical splits
+        # (only LightGBM currently produces set-membership "==" splits).
+        num_nodes = len(self.children_left)
+        if not hasattr(self, "is_categorical") or self.is_categorical is None:
+            self.is_categorical = np.zeros(num_nodes, dtype=np.int32)
+        else:
+            self.is_categorical = np.asarray(self.is_categorical, dtype=np.int32)
+        if not hasattr(self, "cat_thresholds") or self.cat_thresholds is None:
+            self.cat_thresholds = {}
+        # Pack this tree's categorical sets into a per-node int32 bitset: category
+        # `c` follows the left child iff bit `c` of node's words is set.
+        self.cat_num_words, self.cat_bitset = _build_cat_bitset(
+            num_nodes, self.is_categorical, self.cat_thresholds
+        )
+
         # Re-compute the number of samples that pass through each node if we are given data
         if data is not None and data_missing is not None:
             self.node_sample_weight[:] = 0.0
             _cext.dense_tree_update_weights(
                 self.children_left, self.children_right, self.children_default, self.features,
-                self.thresholds, self.values, 1, self.node_sample_weight, data, data_missing
+                self.thresholds, self.values, 1, self.node_sample_weight, data, data_missing,
+                self.is_categorical, self.cat_bitset, self.cat_num_words
             )
 
         # we compute the expectations to make sure they follow the SHAP logic
@@ -1471,7 +1699,7 @@ class IsoTree(SingleTree):
     def __init__(self, tree, tree_features, normalize=False, scaling=1.0, data=None, data_missing=None):
         super(IsoTree, self).__init__(tree, normalize, scaling, data, data_missing)
         if safe_isinstance(tree, "sklearn.tree._tree.Tree"):
-            from sklearn.ensemble._iforest import _average_path_length # pylint: disable=no-name-in-module
+            from sklearn.ensemble._iforest import _average_path_length  # pylint: disable=no-name-in-module
 
             def _recalculate_value(tree, i , level):
                 if tree.children_left[i] == -1 and tree.children_right[i] == -1:
@@ -1508,171 +1736,44 @@ def get_xgboost_json(model):
 
 
 class XGBTreeModelLoader(object):
-    """ This loads an XGBoost model directly from a raw memory dump.
+    """ Loads an XGBoost model from its version-stable JSON interfaces.
 
-    We can't use the JSON dump because due to numerical precision issues those
-    tree can actually be wrong when feature values land almost on a threshold.
+    Older versions of this loader parsed the raw binary buffer returned by
+    ``Booster.save_raw()``, but that binary layout was removed in modern
+    XGBoost (the ``"deprecated"`` raw format no longer exists in >= 2.0), which
+    made the binary parser fail with a ``UnicodeDecodeError``. We now read the
+    model intercept/objective from ``save_config()`` and the per-tree structure
+    from the JSON dump, both of which are stable across XGBoost versions.
     """
     def __init__(self, xgb_model):
-        # new in XGBoost 1.1, 'binf' is appended to the buffer
-        self.buf = xgb_model.save_raw().lstrip(b'binf')
-        self.pos = 0
+        import json
+        self.xgb_model = xgb_model
 
-        # load the model parameters
-        self.base_score = self.read('f')
-        self.num_feature = self.read('I')
-        self.num_class = self.read('i')
-        self.contain_extra_attrs = self.read('i')
-        self.contain_eval_metrics = self.read('i')
-        self.read_arr('i', 29) # reserved
-        self.name_obj_len = self.read('Q')
-        self.name_obj = self.read_str(self.name_obj_len)
-        self.name_gbm_len = self.read('Q')
-        self.name_gbm = self.read_str(self.name_gbm_len)
+        config = json.loads(xgb_model.save_config())
+        learner = config["learner"]
+        self.name_obj = learner["objective"]["name"]
+        model_param = learner["learner_model_param"]
 
-        # new in XGBoost 1.0 is that the base_score is saved untransformed (https://github.com/dmlc/xgboost/pull/5101)
-        # so we have to transform it depending on the objective
-        import xgboost
-        if version.parse(xgboost.__version__).major >= 1:
-            if self.name_obj in ["binary:logistic", "reg:logistic"]:
-                self.base_score = scipy.special.logit(self.base_score) # pylint: disable=no-member
+        # base_score is the model intercept. Modern XGBoost stores it as a
+        # (sometimes bracketed) string and in probability space for logistic
+        # objectives, while SHAP works in margin space, so we transform it.
+        base_score = model_param.get("base_score", 0.5)
+        if isinstance(base_score, str):
+            base_score = json.loads(base_score)
+        self.base_score = float(np.atleast_1d(np.asarray(base_score, dtype=np.float64)).ravel()[0])
+        if self.name_obj in ["binary:logistic", "reg:logistic"]:
+            self.base_score = float(scipy.special.logit(self.base_score))  # pylint: disable=no-member
 
-        assert self.name_gbm == "gbtree", "Only the 'gbtree' model type is supported, not '%s'!" % self.name_gbm
-
-        # load the gbtree specific parameters
-        self.num_trees = self.read('i')
-        self.num_roots = self.read('i')
-        self.num_feature = self.read('i')
-        self.pad_32bit = self.read('i')
-        self.num_pbuffer_deprecated = self.read('Q')
-        self.num_output_group = self.read('i')
-        self.size_leaf_vector = self.read('i')
-        self.read_arr('i', 32) # reserved
-
-        # load each tree
-        self.num_roots = np.zeros(self.num_trees, dtype=np.int32)
-        self.num_nodes = np.zeros(self.num_trees, dtype=np.int32)
-        self.num_deleted = np.zeros(self.num_trees, dtype=np.int32)
-        self.max_depth = np.zeros(self.num_trees, dtype=np.int32)
-        self.num_feature = np.zeros(self.num_trees, dtype=np.int32)
-        self.size_leaf_vector = np.zeros(self.num_trees, dtype=np.int32)
-        self.node_parents = []
-        self.node_cleft = []
-        self.node_cright = []
-        self.node_sindex = []
-        self.node_info = []
-        self.loss_chg = []
-        self.sum_hess = []
-        self.base_weight = []
-        self.leaf_child_cnt = []
-        for i in range(self.num_trees):
-
-            # load the per-tree params
-            self.num_roots[i] = self.read('i')
-            self.num_nodes[i] = self.read('i')
-            self.num_deleted[i] = self.read('i')
-            self.max_depth[i] = self.read('i')
-            self.num_feature[i] = self.read('i')
-            self.size_leaf_vector[i] = self.read('i')
-
-            # load the nodes
-            self.read_arr('i', 31) # reserved
-            self.node_parents.append(np.zeros(self.num_nodes[i], dtype=np.int32))
-            self.node_cleft.append(np.zeros(self.num_nodes[i], dtype=np.int32))
-            self.node_cright.append(np.zeros(self.num_nodes[i], dtype=np.int32))
-            self.node_sindex.append(np.zeros(self.num_nodes[i], dtype=np.uint32))
-            self.node_info.append(np.zeros(self.num_nodes[i], dtype=np.float32))
-            for j in range(self.num_nodes[i]):
-                self.node_parents[-1][j] = self.read('i')
-                self.node_cleft[-1][j] = self.read('i')
-                self.node_cright[-1][j] = self.read('i')
-                self.node_sindex[-1][j] = self.read('I')
-                self.node_info[-1][j] = self.read('f')
-
-            # load the stat nodes
-            self.loss_chg.append(np.zeros(self.num_nodes[i], dtype=np.float32))
-            self.sum_hess.append(np.zeros(self.num_nodes[i], dtype=np.float32))
-            self.base_weight.append(np.zeros(self.num_nodes[i], dtype=np.float32))
-            self.leaf_child_cnt.append(np.zeros(self.num_nodes[i], dtype=int))
-            for j in range(self.num_nodes[i]):
-                self.loss_chg[-1][j] = self.read('f')
-                self.sum_hess[-1][j] = self.read('f')
-                self.base_weight[-1][j] = self.read('f')
-                self.leaf_child_cnt[-1][j] = self.read('i')
+        self.num_class = int(model_param.get("num_class", 0) or 0)
+        self.num_feature = int(model_param.get("num_feature", 0) or 0)
 
     def get_trees(self, data=None, data_missing=None):
-        shape = (self.num_trees, self.num_nodes.max())
-        self.children_default = np.zeros(shape, dtype=int)
-        self.features = np.zeros(shape, dtype=int)
-        self.thresholds = np.zeros(shape, dtype=np.float32)
-        self.values = np.zeros((shape[0], shape[1], 1), dtype=np.float32)
-        trees = []
-        for i in range(self.num_trees):
-            for j in range(self.num_nodes[i]):
-                if np.right_shift(self.node_sindex[i][j], np.uint32(31)) != 0:
-                    self.children_default[i,j] = self.node_cleft[i][j]
-                else:
-                    self.children_default[i,j] = self.node_cright[i][j]
-                self.features[i,j] = self.node_sindex[i][j] & ((np.uint32(1) << np.uint32(31)) - np.uint32(1))
-                if self.node_cleft[i][j] >= 0:
-                    # Xgboost uses < for thresholds where shap uses <=
-                    # Move the threshold down by the smallest possible increment
-                    self.thresholds[i, j] = np.nextafter(self.node_info[i][j], - np.float32(np.inf))
-                else:
-                    self.values[i,j] = self.node_info[i][j]
-
-            l = len(self.node_cleft[i])
-            trees.append(SingleTree({
-                "children_left": self.node_cleft[i],
-                "children_right": self.node_cright[i],
-                "children_default": self.children_default[i,:l],
-                "feature": self.features[i,:l],
-                "threshold": self.thresholds[i,:l],
-                "value": self.values[i,:l],
-                "node_sample_weight": self.sum_hess[i]
-            }, data=data, data_missing=data_missing))
-        return trees
-
-
-    def read(self, dtype):
-        size = struct.calcsize(dtype)
-        val = struct.unpack(dtype, self.buf[self.pos:self.pos+size])[0]
-        self.pos += size
-        return val
-
-    def read_arr(self, dtype, n_items):
-        format = "%d%s" % (n_items, dtype)
-        size = struct.calcsize(format)
-        val = struct.unpack(format, self.buf[self.pos:self.pos+size])[0]
-        self.pos += size
-        return val
-
-    def read_str(self, size):
-        val = self.buf[self.pos:self.pos+size].decode('utf-8')
-        self.pos += size
-        return val
-
-    def print_info(self):
-
-        print("--- global parmeters ---")
-        print("base_score =", self.base_score)
-        print("num_feature =", self.num_feature)
-        print("num_class =", self.num_class)
-        print("contain_extra_attrs =", self.contain_extra_attrs)
-        print("contain_eval_metrics =", self.contain_eval_metrics)
-        print("name_obj_len =", self.name_obj_len)
-        print("name_obj =", self.name_obj)
-        print("name_gbm_len =", self.name_gbm_len)
-        print("name_gbm =", self.name_gbm)
-        print()
-        print("--- gbtree specific parameters ---")
-        print("num_trees =", self.num_trees)
-        print("num_roots =", self.num_roots)
-        print("num_feature =", self.num_feature)
-        print("pad_32bit =", self.pad_32bit)
-        print("num_pbuffer_deprecated =", self.num_pbuffer_deprecated)
-        print("num_output_group =", self.num_output_group)
-        print("size_leaf_vector =", self.size_leaf_vector)
+        import json
+        json_trees = get_xgboost_json(self.xgb_model)
+        return [
+            SingleTree(json.loads(tree), data=data, data_missing=data_missing)
+            for tree in json_trees
+        ]
 
 
 class CatBoostTreeModelLoader:

@@ -1,6 +1,7 @@
 import numpy as np
 from numba import njit
 
+
 @njit
 def identity(x):
     """ A no-op link function.
